@@ -2,11 +2,13 @@
  * test_throughput.c - 吞吐/长稳测试（内核 UDP 后端，跨主机可用）
  *
  * 用法：
- *   # 服务端（接收并统计，run_ms 到点或收到信号退出）
+ *   # 内核 UDP 服务端/客户端
  *   ./test_throughput udp-server <bind_ip> <port> <run_ms>
- *
- *   # 客户端（突发发送 count 条，等待全部确认后统计吞吐）
  *   ./test_throughput udp-client <lip> <lport> <pip> <pport> <count> <msgsize> [timeout_ms]
+ *
+ *   # AF_XDP 服务端/客户端（需 root 与网卡支持）
+ *   ./test_throughput xdp-server <if> <ip> <port> <run_ms>
+ *   ./test_throughput xdp-client <if> <lip> <lport> <pip> <pport> <count> <msgsize> [timeout_ms]
  *
  * 说明：
  *   - 单条消息长度必须 <= 1400（默认上限）；
@@ -66,10 +68,11 @@ static uint32_t parse_ip(const char *s) {
     return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
 
-static void fill_common(sx_config_t *cfg, uint32_t ip, uint16_t port,
-                        sx_recv_fn recv) {
+static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
+                        uint32_t ip, uint16_t port, sx_recv_fn recv) {
     sx_config_init(cfg);
-    cfg->backend = SX_BACKEND_UDP;
+    cfg->backend = use_xdp ? SX_BACKEND_XDP : SX_BACKEND_UDP;
+    cfg->ifname = ifname;
     cfg->conv = 0x7b0u;
     cfg->local_ip = ip;
     cfg->local_port = port;
@@ -80,13 +83,14 @@ static void fill_common(sx_config_t *cfg, uint32_t ip, uint16_t port,
     cfg->recv_window = 8192;
 }
 
-static int run_server(uint32_t ip, uint16_t port, uint32_t run_ms) {
+static int run_server(int use_xdp, const char *ifname, uint32_t ip,
+                      uint16_t port, uint32_t run_ms) {
     sx_config_t cfg;
     sx_endpoint_t *ep;
     uint64_t end = run_ms ? now_ns() + (uint64_t)run_ms * 1000000ull : 0;
     uint64_t t0 = now_ns();
 
-    fill_common(&cfg, ip, port, on_recv);
+    fill_common(&cfg, use_xdp, ifname, ip, port, on_recv);
     ep = sx_create(&cfg);
     if (ep == NULL || sx_start(ep) != SX_OK) {
         fprintf(g_log, "server create/start failed\n");
@@ -120,9 +124,9 @@ static int run_server(uint32_t ip, uint16_t port, uint32_t run_ms) {
     return 0;
 }
 
-static int run_client(uint32_t lip, uint16_t lport, uint32_t pip,
-                      uint16_t pport, uint64_t count, size_t msgsize,
-                      uint32_t timeout_ms) {
+static int run_client(int use_xdp, const char *ifname, uint32_t lip,
+                      uint16_t lport, uint32_t pip, uint16_t pport,
+                      uint64_t count, size_t msgsize, uint32_t timeout_ms) {
     sx_config_t cfg;
     sx_endpoint_t *ep;
     sx_link_t *link;
@@ -132,7 +136,7 @@ static int run_client(uint32_t lip, uint16_t lport, uint32_t pip,
     uint64_t sent = 0;
     uint64_t start;
 
-    fill_common(&cfg, lip, lport, NULL);
+    fill_common(&cfg, use_xdp, ifname, lip, lport, NULL);
     ep = sx_create(&cfg);
     if (ep == NULL || sx_start(ep) != SX_OK) {
         fprintf(g_log, "client create/start failed\n");
@@ -236,14 +240,27 @@ int main(int argc, char **argv) {
 
     if (strcmp(mode, "udp-server") == 0) {
         if (argc < 5) return 2;
-        rc = run_server(parse_ip(argv[2]), (uint16_t)atoi(argv[3]),
+        rc = run_server(0, NULL, parse_ip(argv[2]), (uint16_t)atoi(argv[3]),
                         (uint32_t)atoi(argv[4]));
     } else if (strcmp(mode, "udp-client") == 0) {
         if (argc < 8) return 2;
-        rc = run_client(parse_ip(argv[2]), (uint16_t)atoi(argv[3]),
+        rc = run_client(0, NULL, parse_ip(argv[2]), (uint16_t)atoi(argv[3]),
                         parse_ip(argv[4]), (uint16_t)atoi(argv[5]),
                         strtoull(argv[6], NULL, 10), (size_t)atoi(argv[7]),
                         argc > 8 ? (uint32_t)atoi(argv[8]) : 0);
+    } else if (strcmp(mode, "xdp-server") == 0) {
+        /* xdp-server <if> <ip> <port> <run_ms> */
+        if (argc < 6) return 2;
+        rc = run_server(1, argv[2], parse_ip(argv[3]),
+                        (uint16_t)atoi(argv[4]), (uint32_t)atoi(argv[5]));
+    } else if (strcmp(mode, "xdp-client") == 0) {
+        /* xdp-client <if> <lip> <lport> <pip> <pport> <count> <msgsize> [timeout_ms] */
+        if (argc < 9) return 2;
+        rc = run_client(1, argv[2], parse_ip(argv[3]),
+                        (uint16_t)atoi(argv[4]), parse_ip(argv[5]),
+                        (uint16_t)atoi(argv[6]), strtoull(argv[7], NULL, 10),
+                        (size_t)atoi(argv[8]),
+                        argc > 9 ? (uint32_t)atoi(argv[9]) : 0);
     } else {
         rc = 2;
     }
