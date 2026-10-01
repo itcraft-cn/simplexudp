@@ -203,6 +203,9 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
 
     if (sx_hdr_decode(seg, seg_len, &h) != SX_OK) {
         ep->stats.dropped++;
+        sx_log(ep, SX_LOG_DEBUG, "ep drop decode len=%zu from %u.%u.%u.%u:%u",
+               seg_len, (src_ip >> 24) & 0xff, (src_ip >> 16) & 0xff,
+               (src_ip >> 8) & 0xff, src_ip & 0xff, src_port);
         return 0;
     }
 
@@ -663,6 +666,19 @@ int sx_update(sx_endpoint_t *ep, uint64_t now_ms) {
     return processed;
 }
 
+int sx_wait(sx_endpoint_t *ep, int timeout_ms) {
+    if (ep == NULL || ep->io == NULL) {
+        return SX_ERR_INVALID;
+    }
+    if (ep->io->poll != NULL) {
+        return ep->io->poll(ep->io, timeout_ms);
+    }
+    if (timeout_ms > 0) {
+        usleep((useconds_t)timeout_ms * 1000u);
+    }
+    return 0;
+}
+
 int sx_run(sx_endpoint_t *ep, int timeout_ms) {
     uint64_t start;
     if (ep == NULL) {
@@ -701,6 +717,7 @@ int sx_get_stats(sx_endpoint_t *ep, sx_stats_t *out) {
         sx_link_t *l = ep->links[i];
         if (l != NULL && l->kcp != NULL) {
             out->snd_wnd = SX_MIN(l->kcp->snd_wnd, l->kcp->cwnd);
+            out->snd_outstanding = l->kcp->snd_count;
             out->per_peer_wnd = l->kcp->snd_wnd;
             out->cwnd = l->kcp->cwnd;
             out->rtt_ms = l->kcp->srtt;

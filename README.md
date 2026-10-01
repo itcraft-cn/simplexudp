@@ -92,16 +92,25 @@ sx_destroy(ep);
   并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
   流量确实经 XDP 处理（`sx_stats_map` 的 redirect 计数）。
 
-### 实测参考（本机 veth，两进程内端点）
+### 实测参考（本机，停等 RTT，n=20000）
 
-| 路径 | RTT min | avg | p50 | p99 | max |
+单进程（A/B 两端点在同一进程）：
+
+| 路径 | min | avg | p50 | p99 | max |
 | --- | --- | --- | --- | --- | --- |
-| AF_XDP（native + copy） | 1us | 1~2us | 2us | 2us | 11~17us |
+| AF_XDP（veth，native+copy） | 1us | 1~2us | 2us | 2us | 11~17us |
 | 内核 UDP（lo） | 4us | 4us | 4us | 6us | 55us |
 
-上述为**同进程内两端点**的往返时延（含两端用户态处理），单向下行约为其一半量级。
-`bpftool map dump` 显示 XDP 重定向计数约 4 万（2 万请求 + 2 万回显 + 控制帧），
-证明报文确实经过 XDP 重定向到 AF_XDP。
+双进程（server 与 client 各自独立进程，更接近真实）：
+
+| 路径 | min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| AF_XDP（veth，native+copy） | 1us | 2us | 2us | 4us | ~425us |
+| 内核 UDP（lo） | 0us | 3us | 3us | 5us | ~173us |
+
+均为**往返时延**（含两端用户态处理），单向约为一半量级。双进程 `bpftool map dump`
+显示两个进程各自的 XDP 程序重定向计数均约 4 万（2 万请求 + 2 万回显 + 控制帧），
+证明双向报文都确实经过 XDP 重定向到 AF_XDP。
 
 ## AF_XDP 说明与限制
 

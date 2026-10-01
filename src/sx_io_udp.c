@@ -40,8 +40,11 @@ static int udp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
     n = sendto(p->sock, buf, len, 0, (struct sockaddr *)&sa, sizeof(sa));
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+            sx_log(io->ep, SX_LOG_DEBUG, "udp send EAGAIN len=%zu", len);
             return SX_ERR_AGAIN;
         }
+        sx_log(io->ep, SX_LOG_WARN, "udp send error errno=%d len=%zu", errno,
+               len);
         return SX_ERR_IO;
     }
     return 0;

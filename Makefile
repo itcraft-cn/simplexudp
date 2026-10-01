@@ -21,6 +21,8 @@ MULTIARCH := $(shell $(CC) -print-multiarch 2>/dev/null || echo $(ARCH)-linux-gn
 
 CFLAGS    ?= -std=c99 -O2 -g
 WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual
+# -MMD -MP：生成头文件依赖，避免修改头文件后漏编译导致 ABI/布局不一致。
+DEPFLAGS   = -MMD -MP
 CPPFLAGS  += -Iinclude -Isrc -D_GNU_SOURCE -DSX_XDP_EMBEDDED
 LDLIBS    += -pthread
 
@@ -40,13 +42,21 @@ BPF_CFLAGS := -target bpf -O2 -g -I/usr/include/$(MULTIARCH)
 LIB_SRCS   := $(wildcard src/*.c)
 LIB_OBJS   := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRCS)) $(BUILD)/sx_xdp_kern_blob.o
 
+# 头文件依赖（由 -MMD 生成）。
+DEPS := $(LIB_OBJS:.o=.d)
+-include $(DEPS)
+
+# 直接编译链接的测试/示例需显式依赖头文件。
+HEADERS := include/simplexudp.h src/sx_internal.h tests/sx_test.h
+$(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency: $(HEADERS)
+
 STATIC_LIB := $(BUILD)/libsimplexudp.a
 SHARED_LIB := $(BUILD)/libsimplexudp.so
 
 EXAMPLES   := $(BUILD)/sx_p2p $(BUILD)/sx_group
 TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback
 
-.PHONY: all bpf examples tests tests-xdp tests-latency check check-xdp check-latency clean
+.PHONY: all bpf examples tests tests-xdp tests-latency check check-xdp check-latency check-latency-2p clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 bpf: $(BPF_OBJ)
@@ -64,7 +74,7 @@ $(BUILD)/sx_xdp_kern_blob.o: $(BLOB_C) | $(BUILD)
 
 # ---- 库 ----
 $(BUILD)/%.o: src/%.c | $(BUILD)
-	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) -fPIC -c $< -o $@
+	$(CC) $(CFLAGS) $(WARN) $(DEPFLAGS) $(CPPFLAGS) -fPIC -c $< -o $@
 
 $(STATIC_LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $^
@@ -107,6 +117,11 @@ check-xdp: tests-xdp
 check-latency: tests-latency
 	@chmod +x scripts/xdp_latency.sh
 	@sudo scripts/xdp_latency.sh $(BUILD)/test_latency
+
+# 需要 root：双进程 AF_XDP 时延测试（server/client 各自独立进程与 XDP 程序）。
+check-latency-2p: tests-latency
+	@chmod +x scripts/xdp_latency_2p.sh
+	@sudo scripts/xdp_latency_2p.sh $(BUILD)/test_latency
 
 $(BUILD):
 	@mkdir -p $(BUILD)

@@ -137,6 +137,7 @@ typedef struct sx_stats {
     uint64_t nack_recv;
     uint64_t dropped;       /* 因窗口满/校验失败等丢弃 */
     uint32_t snd_wnd;       /* 当前发送窗口可用 */
+    uint32_t snd_outstanding;/* 在途未确认消息数 */
     uint32_t per_peer_wnd;  /* 对端通告窗口 */
     uint32_t cwnd;
     uint32_t rtt_ms;        /* 平滑 RTT */
@@ -233,6 +234,11 @@ int sx_update(sx_endpoint_t *ep, uint64_t now_ms);
 
 /* 阻塞运行直到 sx_stop 或收到信号（内部循环 sx_update）。timeout_ms<0 表示一直运行。 */
 int sx_run(sx_endpoint_t *ep, int timeout_ms);
+
+/* 等待可读事件（内部 poll 后端 fd）。
+ * 返回 >0 表示可读，0 表示超时，<0 表示错误。timeout_ms<0 表示无限等待。
+ * 建议事件循环：先 sx_wait 再 sx_update，可避免忙等。 */
+int sx_wait(sx_endpoint_t *ep, int timeout_ms);
 
 /* ------------------------------------------------------------------ */
 /* 链路（peer/组）管理                                                 */

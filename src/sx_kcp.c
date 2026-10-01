@@ -296,11 +296,19 @@ static int kcp_parse_ack(sx_kcp_t *k, uint32_t sn, uint64_t now) {
     return 1;
 }
 
-/* 对序号 < sn 的在途消息累加 fastack（KCP 快速重传思想）。 */
+/* 对序号 < sn 的在途消息累加 fastack（KCP 快速重传思想）。
+ * 注意：sn 可能落后于 snd_una（陈旧/重复 ACK），必须直接返回，否则
+ * 以 != 为终止条件的循环会遍历整个 32 位序号空间导致长时间卡死。 */
 static void kcp_skip_acks(sx_kcp_t *k, uint32_t sn) {
     uint32_t s;
+    uint32_t stop;
     uint32_t mask = k->send_cap - 1u;
-    for (s = k->snd_una; s != sn; s++) {
+
+    if (!sx_seq_after(sn, k->snd_una)) {
+        return; /* sn <= snd_una：无需要标记的跨越 */
+    }
+    stop = sx_seq_after(sn, k->snd_nxt) ? k->snd_nxt : sn;
+    for (s = k->snd_una; s != stop; s++) {
         sx_msg_t *slot = &k->snd_buf[s & mask];
         if (slot->seq == s && slot->flags == SX_MSG_USED) {
             if (slot->fastack < 0xffffu) {
@@ -420,12 +428,13 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
     uint32_t seq = h->seq;
 
     if (seq == k->rcv_nxt) {
-        /* 按序，直接投递。 */
+        /* 先推进 rcv_nxt，再投递：这样回调内若立即发送（如应用回显），
+         * 其携带的累积确认 una 才是最新的，不会漏确认当前这条消息。 */
+        k->rcv_nxt++;
         sx_ep_deliver(k->ep, k->link, k->link->addr.ip, k->link->addr.port,
                       payload, h->payload_len);
         k->ep->stats.rx_packets++;
         k->ep->stats.rx_bytes += h->payload_len;
-        k->rcv_nxt++;
         kcp_drain(k);
         kcp_add_ack(k, seq);
     } else if (sx_seq_after(seq, k->rcv_nxt) &&
@@ -454,10 +463,14 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
         slot->fastack = 0;
         k->rcv_count++;
         k->ep->stats.reorder_pkts++;
+        sx_log(k->ep, SX_LOG_DEBUG, "kcp ooo seq=%u rcv_nxt=%u", seq,
+               k->rcv_nxt);
         kcp_add_ack(k, seq);
     } else {
         /* 老包/重复包：仅补 ACK。 */
         k->ep->stats.dup_packets++;
+        sx_log(k->ep, SX_LOG_DEBUG, "kcp dup seq=%u rcv_nxt=%u", seq,
+               k->rcv_nxt);
         kcp_add_ack(k, seq);
     }
     (void)now;
@@ -476,6 +489,7 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     }
     if (sx_hdr_decode(seg, seg_len, &h) != SX_OK) {
         k->ep->stats.dropped++;
+        sx_log(k->ep, SX_LOG_DEBUG, "kcp drop decode len=%zu", seg_len);
         return;
     }
     if (h.conv != k->conv) {
@@ -499,7 +513,8 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     /* 累积确认：对端 una 之前的数据均已被接收。 */
     if (sx_seq_after(h.una, k->snd_una)) {
         uint32_t s;
-        uint32_t stop = h.una;
+        /* 累积确认上限钳制到 snd_nxt，避免异常/陈旧 una 导致长时间循环。 */
+        uint32_t stop = sx_seq_after(h.una, k->snd_nxt) ? k->snd_nxt : h.una;
         for (s = k->snd_una; s != stop; s++) {
             if (kcp_parse_ack(k, s, now_ms)) {
                 new_ack = 1;
@@ -539,10 +554,13 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
         }
         break;
     case SX_CMD_HELLO:
-        k->established = 1;
-        k->up = 1;
-        kcp_emit(k, SX_CMD_HELLO, 0, 0);
-        sx_ep_emit(k->ep, SX_EVENT_PEER_UP, k->link);
+        /* 仅在未建链时回一次 HELLO，避免双方互答造成风暴。 */
+        if (!k->established) {
+            k->established = 1;
+            k->up = 1;
+            kcp_emit(k, SX_CMD_HELLO, 0, 0);
+            sx_ep_emit(k->ep, SX_EVENT_PEER_UP, k->link);
+        }
         break;
     case SX_CMD_ACK:
     case SX_CMD_WINS:

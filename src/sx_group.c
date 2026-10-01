@@ -280,10 +280,11 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
     uint32_t seq = h->seq;
 
     if (seq == s->rcv_nxt) {
+        /* 先推进期望序号，再投递（回调内可能立即发送）。 */
+        s->rcv_nxt++;
         sx_ep_deliver(g->ep, g->link, s->ip, s->port, payload, h->payload_len);
         g->ep->stats.rx_packets++;
         g->ep->stats.rx_bytes += h->payload_len;
-        s->rcv_nxt++;
         group_drain(g, s);
     } else if (sx_seq_after(seq, s->rcv_nxt) &&
                (seq - s->rcv_nxt) < SX_GROUP_REORDER) {
