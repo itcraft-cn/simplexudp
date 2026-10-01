@@ -79,7 +79,7 @@ sx_destroy(ep);
 - 组播：`sx_add_multicast`（UDP 后端会 `IP_ADD_MEMBERSHIP`）。
 - 广播：`sx_add_broadcast`（目的地址通常 `255.255.255.255` 或子网广播）。
 
-详见 `docs/design.md`、`examples/sx_p2p.c`、`examples/sx_group.c`。
+详见 **使用手册 `docs/manual.md`**、设计文档 `docs/design.md`、示例 `examples/sx_p2p.c`、`examples/sx_group.c`。
 
 ## 测试
 
