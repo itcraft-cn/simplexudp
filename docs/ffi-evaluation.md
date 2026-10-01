@@ -3,6 +3,8 @@
 范围：评估将 `simple-xudp`(SX) 暴露给 Python（Cython）与 Java（JNI / Unsafe+mmap+线程唤醒）
 两条路线的可行性、性能上限、复杂度与风险。本文不含实现代码，只做评估与建议。
 
+> 相关：待办与排期记录见 `docs/ffi-todo.md`（当前聚焦 C 库实现，FFI 暂缓）。
+
 ---
 
 ## 0. 结论摘要

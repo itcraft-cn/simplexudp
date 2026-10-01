@@ -80,6 +80,7 @@ sx_destroy(ep);
 - 广播：`sx_add_broadcast`（目的地址通常 `255.255.255.255` 或子网广播）。
 
 详见 **使用手册 `docs/manual.md`**、设计文档 `docs/design.md`、示例 `examples/sx_p2p.c`、`examples/sx_group.c`。
+多语言（Python/Java）绑定评估与计划见 `docs/ffi-evaluation.md`、`docs/ffi-todo.md`（当前聚焦 C 库，FFI 暂缓）。
 
 ## 测试
 
