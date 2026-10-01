@@ -22,6 +22,23 @@
  */
 #include "sx_internal.h"
 
+#ifdef SX_NO_XDP
+/*
+ * UDP-only 构建（SX_NO_XDP=1）：不依赖 libbpf/libxdp/clang。
+ * 提供同名接口的桩实现：XDP 后端不可用，AUTO 会自动回退到内核 UDP。
+ */
+sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
+    (void)ep;
+    return NULL;
+}
+
+int sx_io_xdp_send_frame(sx_io_t *io, const uint8_t *frame, size_t len) {
+    (void)io;
+    (void)frame;
+    (void)len;
+    return SX_ERR_UNSUPPORTED;
+}
+#else
 #include <arpa/inet.h>
 #include <errno.h>
 #include <net/if.h>
@@ -660,3 +677,4 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
            (p->bind_flags == XDP_ZEROCOPY) ? "zero-copy" : "copy");
     return io;
 }
+#endif /* !SX_NO_XDP */

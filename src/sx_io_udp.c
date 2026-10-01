@@ -8,6 +8,11 @@
  * 注意：
  *   - 非阻塞 socket + poll；epoll/select 由上层 poll 决定。
  *   - 组播需调用 join_multicast 加入组；广播由 sendto 目的地址决定。
+ *   - 可选“丢包/乱序注入”（编译期 SX_ENABLE_LOSS_INJECT，运行期环境变量开启），
+ *     用于在没有 root/netem 的环境下测试可靠层在真实网络上的恢复能力：
+ *       SX_LOSSY_DROP_PPM    丢包概率（ppm，0..1000000）
+ *       SX_LOSSY_DUP_PPM     重复概率（ppm）
+ *       SX_LOSSY_REORDER_PPM 相邻乱序概率（ppm）
  */
 #include "sx_internal.h"
 
@@ -25,11 +30,49 @@
 
 typedef struct sx_udp_priv {
     int sock;
+#ifdef SX_ENABLE_LOSS_INJECT
+    uint32_t drop_ppm;
+    uint32_t dup_ppm;
+    uint32_t reorder_ppm;
+    uint64_t rng;
+    int has_pend;
+    uint8_t pend[2048];
+    size_t pend_len;
+    uint32_t pend_ip;
+    uint16_t pend_port;
+#endif
 } sx_udp_priv_t;
 
-static int udp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
-                      const void *buf, size_t len) {
-    sx_udp_priv_t *p = (sx_udp_priv_t *)io->priv;
+#ifdef SX_ENABLE_LOSS_INJECT
+static uint32_t sx_xorshift64(uint64_t *s) {
+    uint64_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *s = x;
+    return (uint32_t)(x >> 16) & 0xffffffu;
+}
+
+static uint32_t env_ppm(const char *name) {
+    const char *v = getenv(name);
+    long n;
+    if (v == NULL || v[0] == '\0') {
+        return 0;
+    }
+    n = strtol(v, NULL, 10);
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > 1000000) {
+        n = 1000000;
+    }
+    return (uint32_t)n;
+}
+#endif
+
+/* 真正的发送（无注入）。 */
+static int udp_raw_send(sx_udp_priv_t *p, uint32_t dst_ip, uint16_t dst_port,
+                        const void *buf, size_t len) {
     struct sockaddr_in sa;
     ssize_t n;
 
@@ -40,14 +83,54 @@ static int udp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
     n = sendto(p->sock, buf, len, 0, (struct sockaddr *)&sa, sizeof(sa));
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
-            sx_log(io->ep, SX_LOG_DEBUG, "udp send EAGAIN len=%zu", len);
             return SX_ERR_AGAIN;
         }
-        sx_log(io->ep, SX_LOG_WARN, "udp send error errno=%d len=%zu", errno,
-               len);
         return SX_ERR_IO;
     }
     return 0;
+}
+
+static int udp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
+                      const void *buf, size_t len) {
+    sx_udp_priv_t *p = (sx_udp_priv_t *)io->priv;
+#ifdef SX_ENABLE_LOSS_INJECT
+    /* 丢包：直接视为在网络上丢失。 */
+    if (p->drop_ppm != 0 &&
+        sx_xorshift64(&p->rng) % 1000000u < p->drop_ppm) {
+        return SX_OK;
+    }
+    /* 重复。 */
+    if (p->dup_ppm != 0 && sx_xorshift64(&p->rng) % 1000000u < p->dup_ppm) {
+        (void)udp_raw_send(p, dst_ip, dst_port, buf, len);
+        return udp_raw_send(p, dst_ip, dst_port, buf, len);
+    }
+    /* 相邻乱序：暂存一包，下一次发送时先发新包再发暂存包。 */
+    if (p->reorder_ppm != 0) {
+        if (p->has_pend && len <= sizeof(p->pend) &&
+            sx_xorshift64(&p->rng) % 1000000u < p->reorder_ppm) {
+            int r = udp_raw_send(p, dst_ip, dst_port, buf, len);
+            (void)udp_raw_send(p, p->pend_ip, p->pend_port, p->pend,
+                               p->pend_len);
+            p->has_pend = 0;
+            return r;
+        }
+        if (!p->has_pend && len <= sizeof(p->pend) &&
+            sx_xorshift64(&p->rng) % 1000000u < p->reorder_ppm) {
+            memcpy(p->pend, buf, len);
+            p->pend_len = len;
+            p->pend_ip = dst_ip;
+            p->pend_port = dst_port;
+            p->has_pend = 1;
+            return SX_OK;
+        }
+        if (p->has_pend) {
+            (void)udp_raw_send(p, p->pend_ip, p->pend_port, p->pend,
+                               p->pend_len);
+            p->has_pend = 0;
+        }
+    }
+#endif
+    return udp_raw_send(p, dst_ip, dst_port, buf, len);
 }
 
 static int udp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
@@ -172,6 +255,18 @@ sx_io_t *sx_io_udp_create(sx_endpoint_t *ep) {
     if (flags >= 0) {
         (void)fcntl(p->sock, F_SETFL, flags | O_NONBLOCK);
     }
+
+#ifdef SX_ENABLE_LOSS_INJECT
+    p->drop_ppm = env_ppm("SX_LOSSY_DROP_PPM");
+    p->dup_ppm = env_ppm("SX_LOSSY_DUP_PPM");
+    p->reorder_ppm = env_ppm("SX_LOSSY_REORDER_PPM");
+    p->rng = 0x9e3779b97f4a7c15ull ^ (uint64_t)(uintptr_t)p;
+    if (p->drop_ppm || p->dup_ppm || p->reorder_ppm) {
+        sx_log(ep, SX_LOG_WARN,
+               "loss inject enabled: drop=%u dup=%u reorder=%u ppm",
+               p->drop_ppm, p->dup_ppm, p->reorder_ppm);
+    }
+#endif
 
     io->name = "udp";
     io->ep = ep;

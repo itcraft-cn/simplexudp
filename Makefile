@@ -4,51 +4,61 @@
 #   make            构建静态库/动态库
 #   make examples   构建示例
 #   make tests      构建测试
-#   make check      运行单元/回环测试（无需 root）
+#   make check      运行单元/回环测试（无需 root，UDP 后端）
 #   make bpf        仅编译 XDP BPF 目标
 #   make clean
 #
-# 说明：
-#   - 自动探测架构（x86_64 / aarch64），BPF 目标用 clang -target bpf 编译；
-#   - XDP 目标对象内嵌进库（xxd 生成字节数组），运行时可被 SX_XDP_OBJ 覆盖。
+# 选项：
+#   SX_NO_XDP=1     仅内核 UDP 后端（不依赖 libbpf/libxdp/clang），用于无 XDP 环境
+#   SX_LOSSY=1      编译进“丢包/乱序注入”（测试用，经环境变量开启），用于无 root 的可靠性测试
 
-CC      ?= gcc
-AR      ?= ar
+CC        ?= gcc
+AR        ?= ar
 BPF_CLANG ?= clang
 
 ARCH      := $(shell uname -m)
 MULTIARCH := $(shell $(CC) -print-multiarch 2>/dev/null || echo $(ARCH)-linux-gnu)
 
+SX_NO_XDP ?= 0
+SX_LOSSY  ?= 0
+
 CFLAGS    ?= -std=c99 -O2 -g
 WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual
 # -MMD -MP：生成头文件依赖，避免修改头文件后漏编译导致 ABI/布局不一致。
 DEPFLAGS   = -MMD -MP
-CPPFLAGS  += -Iinclude -Isrc -D_GNU_SOURCE -DSX_XDP_EMBEDDED
-LDLIBS    += -pthread
-
-PKG_OK := $(shell pkg-config --exists libbpf libxdp 2>/dev/null && echo yes)
-ifeq ($(PKG_OK),yes)
-  CPPFLAGS += $(shell pkg-config --cflags libbpf libxdp)
-  LDLIBS   += $(shell pkg-config --libs libbpf libxdp)
-else
-  LDLIBS   += -lbpf -lxdp -lelf -lz
-endif
+CPPFLAGS  += -Iinclude -Isrc -D_GNU_SOURCE
+LDLIBS    += -pthread -lrt
 
 BUILD      := build
 BPF_OBJ    := $(BUILD)/sx_xdp_kern.o
 BLOB_C     := $(BUILD)/sx_xdp_kern_blob.c
 BPF_CFLAGS := -target bpf -O2 -g -I/usr/include/$(MULTIARCH)
 
+ifeq ($(SX_LOSSY),1)
+  CPPFLAGS += -DSX_ENABLE_LOSS_INJECT
+endif
+
+ifeq ($(SX_NO_XDP),1)
+  CPPFLAGS += -DSX_NO_XDP
+  LIB_EXTRA_OBJS :=
+else
+  CPPFLAGS += -DSX_XDP_EMBEDDED
+  LIB_EXTRA_OBJS := $(BUILD)/sx_xdp_kern_blob.o
+  PKG_OK := $(shell pkg-config --exists libbpf libxdp 2>/dev/null && echo yes)
+  ifeq ($(PKG_OK),yes)
+    CPPFLAGS += $(shell pkg-config --cflags libbpf libxdp)
+    LDLIBS   += $(shell pkg-config --libs libbpf libxdp)
+  else
+    LDLIBS   += -lbpf -lxdp -lelf -lz
+  endif
+endif
+
 LIB_SRCS   := $(wildcard src/*.c)
-LIB_OBJS   := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRCS)) $(BUILD)/sx_xdp_kern_blob.o
+LIB_OBJS   := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRCS)) $(LIB_EXTRA_OBJS)
 
 # 头文件依赖（由 -MMD 生成）。
 DEPS := $(LIB_OBJS:.o=.d)
 -include $(DEPS)
-
-# 直接编译链接的测试/示例需显式依赖头文件。
-HEADERS := include/simplexudp.h src/sx_internal.h tests/sx_test.h
-$(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency: $(HEADERS)
 
 STATIC_LIB := $(BUILD)/libsimplexudp.a
 SHARED_LIB := $(BUILD)/libsimplexudp.so
@@ -56,12 +66,16 @@ SHARED_LIB := $(BUILD)/libsimplexudp.so
 EXAMPLES   := $(BUILD)/sx_p2p $(BUILD)/sx_group
 TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback
 
-.PHONY: all bpf examples tests tests-xdp tests-latency check check-xdp check-latency check-latency-2p clean
+# 直接编译链接的测试/示例需显式依赖头文件。
+HEADERS := include/simplexudp.h src/sx_internal.h tests/sx_test.h
+$(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency $(BUILD)/test_throughput: $(HEADERS)
+
+.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput check check-xdp check-latency check-latency-2p clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 bpf: $(BPF_OBJ)
 
-# ---- BPF 目标 ----
+# ---- BPF 目标（SX_NO_XDP=1 时不参与构建）----
 $(BPF_OBJ): bpf/sx_xdp_kern.c | $(BUILD)
 	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
 
@@ -94,12 +108,12 @@ $(BUILD)/sx_group: examples/sx_group.c $(STATIC_LIB) | $(BUILD)
 # ---- 测试 ----
 tests: $(TESTS)
 
+tests-xdp: $(BUILD)/test_xdp
+tests-latency: $(BUILD)/test_latency
+tests-throughput: $(BUILD)/test_throughput
+
 $(BUILD)/test_%: tests/test_%.c $(STATIC_LIB) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< $(STATIC_LIB) -o $@ $(LDLIBS)
-
-tests-xdp: $(BUILD)/test_xdp
-
-tests-latency: $(BUILD)/test_latency
 
 check: tests
 	@mkdir -p $(BUILD)
