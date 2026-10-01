@@ -112,6 +112,28 @@ sx_destroy(ep);
 显示两个进程各自的 XDP 程序重定向计数均约 4 万（2 万请求 + 2 万回显 + 控制帧），
 证明双向报文都确实经过 XDP 重定向到 AF_XDP。
 
+### 绑核（强烈建议）
+
+不绑核时 max 抖动较大（UDP/lo 约 300~400us，AF_XDP/veth 可到数百 us），
+主因是进程迁移与中断/软中断争抢；绑到两个不同的**性能核**后 max 降到约 20~30us：
+
+| 路径 | 绑核 | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| UDP/lo | 不绑 | 3us | 4us | ~408us |
+| UDP/lo | s=4 c=5 | 2us | 3us | ~16us |
+| AF_XDP/veth | 不绑 | 2us | 4us | 66~845us |
+| AF_XDP/veth | s=1 c=2 | 2us | 4us | ~20us |
+| AF_XDP/veth | s=2 c=3 | 2us | 5us | ~22us |
+
+建议：server 与 client 各绑一个不同的性能核（本机 c0–c5，6.8GHz），避开中断核 c0；
+iWLAN/WiFi 队列中断分布在 c0–c8，若追求极低抖动可把 IRQ 亲和性移出所用核
+（`/proc/irq/*/smp_affinity_list`）。
+
+```sh
+# 双进程 + 绑核
+SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latency
+```
+
 ## AF_XDP 说明与限制
 
 - attach 模式：native 优先，失败回退 generic；bind：zero-copy 优先，失败回退 copy（自动侦测）。

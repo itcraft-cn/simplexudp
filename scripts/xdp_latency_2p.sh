@@ -20,6 +20,13 @@ WARMUP=200
 CHOLD=4000
 SHOLD=15000
 
+# 可选绑核：把 server/client 分别绑定到不同 CPU（建议两个不同的性能核，避开中断核）。
+# 例：SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh
+TASKSET_S=""
+TASKSET_C=""
+[ -n "${SX_CPU_SERVER:-}" ] && TASKSET_S="taskset -c ${SX_CPU_SERVER}"
+[ -n "${SX_CPU_CLIENT:-}" ] && TASKSET_C="taskset -c ${SX_CPU_CLIENT}"
+
 log() { echo "[xdp_latency_2p] $*"; }
 
 cleanup() {
@@ -52,14 +59,15 @@ sysctl -w net.ipv4.conf."$IF1".rp_filter=0 >/dev/null 2>&1 || true
 SLOG="$ROOT/build/test_latency_server.log"
 CLOG="$ROOT/build/test_latency_client.log"
 
-log "启动 server 进程 (xdp-server $IF1 $IP1 $SPORT) ..."
-SX_LOG="$SLOG" "$BIN" xdp-server "$IF1" "$IP1" "$SPORT" "$SHOLD" >/dev/null 2>&1 &
+log "启动 server 进程 (xdp-server $IF1 $IP1 $SPORT) ${TASKSET_S:+[$TASKSET_S]} ..."
+SX_LOG="$SLOG" $TASKSET_S "$BIN" xdp-server "$IF1" "$IP1" "$SPORT" "$SHOLD" \
+    >/dev/null 2>&1 &
 SPID=$!
 sleep 1
 
-log "启动 client 进程 (xdp-client $IF0 $IP0 $CPORT -> $IP1:$SPORT) ..."
-SX_LOG="$CLOG" "$BIN" xdp-client "$IF0" "$IP0" "$CPORT" "$IP1" "$SPORT" \
-    "$ROUNDS" "$WARMUP" "$CHOLD" >/dev/null 2>&1 &
+log "启动 client 进程 (xdp-client $IF0 $IP0 $CPORT -> $IP1:$SPORT) ${TASKSET_C:+[$TASKSET_C]} ..."
+SX_LOG="$CLOG" $TASKSET_C "$BIN" xdp-client "$IF0" "$IP0" "$CPORT" "$IP1" \
+    "$SPORT" "$ROUNDS" "$WARMUP" "$CHOLD" >/dev/null 2>&1 &
 CPID=$!
 
 sleep 1
