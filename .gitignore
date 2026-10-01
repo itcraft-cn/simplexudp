@@ -1,0 +1,8 @@
+build/
+build-cmake/
+*.o
+*.a
+*.so
+*.log
+MEMORY.md
+.vscode/
