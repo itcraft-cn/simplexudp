@@ -43,6 +43,25 @@ struct {
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
+/* 处理计数（per-CPU）：[0]=重定向到 xsk，[1]=PASS 回内核。可用 bpftool
+ * `map dump` 观察，作为“流量确实经过 XDP 处理”的证据。 */
+#define SX_STAT_REDIRECT 0
+#define SX_STAT_PASS 1
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, __u32);
+    __type(value, __u64);
+} sx_stats_map SEC(".maps");
+
+static __always_inline void sx_stat_inc(__u32 key) {
+    __u64 *v = bpf_map_lookup_elem(&sx_stats_map, &key);
+    if (v) {
+        __sync_fetch_and_add(v, 1);
+    }
+}
+
 /* 判断该帧是否应重定向到用户态。 */
 static __always_inline int sx_should_redirect(struct xdp_md *ctx, void *data,
                                               void *data_end) {
@@ -94,11 +113,14 @@ int sx_xdp_redirect_prog(struct xdp_md *ctx) {
     __u32 idx = ctx->rx_queue_index;
 
     if (!sx_should_redirect(ctx, data, data_end)) {
+        sx_stat_inc(SX_STAT_PASS);
         return XDP_PASS;
     }
     if (bpf_map_lookup_elem(&xsks_map, &idx)) {
+        sx_stat_inc(SX_STAT_REDIRECT);
         return bpf_redirect_map(&xsks_map, idx, 0);
     }
+    sx_stat_inc(SX_STAT_PASS);
     return XDP_PASS;
 }
 

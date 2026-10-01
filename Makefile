@@ -46,7 +46,7 @@ SHARED_LIB := $(BUILD)/libsimplexudp.so
 EXAMPLES   := $(BUILD)/sx_p2p $(BUILD)/sx_group
 TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback
 
-.PHONY: all bpf examples tests tests-xdp check check-xdp clean
+.PHONY: all bpf examples tests tests-xdp tests-latency check check-xdp check-latency clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 bpf: $(BPF_OBJ)
@@ -89,6 +89,8 @@ $(BUILD)/test_%: tests/test_%.c $(STATIC_LIB) | $(BUILD)
 
 tests-xdp: $(BUILD)/test_xdp
 
+tests-latency: $(BUILD)/test_latency
+
 check: tests
 	@mkdir -p $(BUILD)
 	@$(BUILD)/test_frame  $(BUILD)/test_frame.log;  echo "test_frame  exit=$$?"
@@ -100,6 +102,11 @@ check: tests
 check-xdp: tests-xdp
 	@chmod +x scripts/veth_test.sh
 	@sudo scripts/veth_test.sh $(BUILD)/test_xdp
+
+# 需要 root：AF_XDP 时延测试，并用 bpftool 佐证流量经过 XDP。
+check-latency: tests-latency
+	@chmod +x scripts/xdp_latency.sh
+	@sudo scripts/xdp_latency.sh $(BUILD)/test_latency
 
 $(BUILD):
 	@mkdir -p $(BUILD)

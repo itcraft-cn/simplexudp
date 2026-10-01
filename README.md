@@ -39,8 +39,9 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 make            # 构建 build/libsimplexudp.a 与 .so（内含 XDP BPF 目标）
 make examples   # 构建示例
 make tests      # 构建测试
-make check      # 运行单元/回环测试（无需 root，UDP 后端）
-make check-xdp  # 需要 root：创建 veth 跑 AF_XDP 端到端测试
+make check         # 运行单元/回环测试（无需 root，UDP 后端）
+make check-xdp     # 需要 root：创建 veth 跑 AF_XDP 端到端测试
+make check-latency # 需要 root：AF_XDP 时延测试 + bpftool 佐证流量经过 XDP
 ```
 
 备选：`cmake -S . -B build-cmake && cmake --build build-cmake -j`。
@@ -87,6 +88,20 @@ sx_destroy(ep);
 - `tests/test_kcp.c`：注入 **丢包 + 相邻乱序**，验证 100/100 按序到达且确有重传。
 - `tests/test_loopback.c`：UDP 后端端到端双向有序投递。
 - `tests/test_xdp.c` + `scripts/veth_test.sh`：veth 上 AF_XDP native/copy 端到端。
+- `tests/test_latency.c` + `scripts/xdp_latency.sh`：停等往返时延统计（min/avg/p50/p99/max），
+  并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
+  流量确实经 XDP 处理（`sx_stats_map` 的 redirect 计数）。
+
+### 实测参考（本机 veth，两进程内端点）
+
+| 路径 | RTT min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| AF_XDP（native + copy） | 1us | 1~2us | 2us | 2us | 11~17us |
+| 内核 UDP（lo） | 4us | 4us | 4us | 6us | 55us |
+
+上述为**同进程内两端点**的往返时延（含两端用户态处理），单向下行约为其一半量级。
+`bpftool map dump` 显示 XDP 重定向计数约 4 万（2 万请求 + 2 万回显 + 控制帧），
+证明报文确实经过 XDP 重定向到 AF_XDP。
 
 ## AF_XDP 说明与限制
 
