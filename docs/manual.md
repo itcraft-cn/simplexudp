@@ -133,7 +133,9 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 - **内部线程**：`cfg.rx_thread = 1` 时库启动收发/定时线程，回调在库线程触发。
   库内部锁为递归锁，允许在回调中直接调用 `sx_send`。
 
-线程安全：`sx_send`/`sx_update`/链路增删受端点锁保护；多个应用线程可并发 `sx_send`。
+线程安全：`sx_send`/`sx_update`/`sx_recv`/链路增删/`sx_get_stats` 内部均由端点锁（递归锁）保护，
+多个应用线程可并发调用；回调内可安全调用 `sx_send`。注意 `sx_link_t*` 句柄在 `sx_link_remove`
+之后失效，移除时勿与其他线程正在使用的同一句柄并发。
 
 ---
 
@@ -251,8 +253,9 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 便捷发送：自动创建/复用对应点播链路后发送。
 
 #### `ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out, sx_link_t **link_out)`
-拉取模式接收一条按序消息。返回实际长度；无数据返回 `SX_ERR_AGAIN`；
-`src_out`/`link_out` 可为 NULL。仅在使用拉取模式（`on_recv=NULL`）时使用。
+拉取模式接收一条按序消息。返回**完整消息长度**：若返回值大于 `cap`，说明本次被截断，
+调用方应据此处理（放大缓冲或丢弃）；无数据返回 `SX_ERR_AGAIN`；`src_out`/`link_out` 可为 NULL。
+仅在使用拉取模式（`on_recv=NULL`）时使用。
 
 ### 7.5 属性与统计
 

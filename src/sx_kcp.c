@@ -232,6 +232,13 @@ int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
     if (len > 0) {
         copy = (uint8_t *)malloc(len);
         if (copy == NULL) {
+            /* 复位槽位，避免留下 data=NULL 但 seq/flags 陈旧的半初始化状态。 */
+            slot->seq = 0;
+            slot->len = 0;
+            slot->xmit = 0;
+            slot->fastack = 0;
+            slot->xmit_ts = 0;
+            slot->flags = SX_MSG_FREE;
             return SX_ERR_NOMEM;
         }
         memcpy(copy, data, len);
@@ -403,7 +410,8 @@ static void kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
 /* 投递按序到达的消息直到空洞。 */
 static void kcp_drain(sx_kcp_t *k) {
     uint32_t mask = k->recv_cap - 1u;
-    for (;;) {
+    uint32_t guard;
+    for (guard = 0; guard < k->recv_cap; guard++) {
         sx_msg_t *slot = &k->rcv_buf[k->rcv_nxt & mask];
         if (slot->seq != k->rcv_nxt || slot->flags != SX_MSG_USED) {
             break;
@@ -476,12 +484,45 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
     (void)now;
 }
 
+/* 处理一条段携带的确认信息：累积确认(una) + 选择性确认(ack_list)，
+ * 并标记需要快速重传的序号。返回是否产生了新确认。 */
+static int kcp_process_acks(sx_kcp_t *k, const sx_hdr_t *h,
+                            const uint8_t *list, uint64_t now_ms) {
+    uint32_t i;
+    int new_ack = 0;
+
+    /* 累积确认：对端 una 之前的数据均已被接收（上限钳制到 snd_nxt，
+     * 避免异常/陈旧 una 导致长时间循环）。 */
+    if (sx_seq_after(h->una, k->snd_una)) {
+        uint32_t s;
+        uint32_t stop = sx_seq_after(h->una, k->snd_nxt) ? k->snd_nxt : h->una;
+        for (s = k->snd_una; s != stop; s++) {
+            if (kcp_parse_ack(k, s, now_ms)) {
+                new_ack = 1;
+                kcp_on_ack(k);
+            }
+        }
+        kcp_skip_acks(k, stop);
+    }
+    /* 选择性确认列表（对任意命令都处理）。 */
+    for (i = 0; i < h->ack_count; i++) {
+        uint32_t a = ((uint32_t)list[0] << 24) | ((uint32_t)list[1] << 16) |
+                     ((uint32_t)list[2] << 8) | (uint32_t)list[3];
+        list += 4;
+        if (kcp_parse_ack(k, a, now_ms)) {
+            new_ack = 1;
+            kcp_on_ack(k);
+        }
+        kcp_skip_acks(k, a);
+    }
+    return new_ack;
+}
+
 void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
                   uint64_t now_ms) {
     sx_hdr_t h;
     const uint8_t *list;
     const uint8_t *payload;
-    uint32_t i;
     int new_ack = 0;
 
     if (k == NULL || seg == NULL) {
@@ -510,34 +551,11 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
         k->snd_wnd = SX_MIN(h.wnd, k->send_cap);
     }
 
-    /* 累积确认：对端 una 之前的数据均已被接收。 */
-    if (sx_seq_after(h.una, k->snd_una)) {
-        uint32_t s;
-        /* 累积确认上限钳制到 snd_nxt，避免异常/陈旧 una 导致长时间循环。 */
-        uint32_t stop = sx_seq_after(h.una, k->snd_nxt) ? k->snd_nxt : h.una;
-        for (s = k->snd_una; s != stop; s++) {
-            if (kcp_parse_ack(k, s, now_ms)) {
-                new_ack = 1;
-                kcp_on_ack(k);
-            }
-        }
-        kcp_skip_acks(k, stop);
-    }
-
-    /* 选择性确认列表（对任意命令都处理）。 */
-    for (i = 0; i < h.ack_count; i++) {
-        uint32_t a = ((uint32_t)list[0] << 24) | ((uint32_t)list[1] << 16) |
-                     ((uint32_t)list[2] << 8) | (uint32_t)list[3];
-        list += 4;
-        if (kcp_parse_ack(k, a, now_ms)) {
-            new_ack = 1;
-            kcp_on_ack(k);
-        }
-        kcp_skip_acks(k, a);
-    }
-    /* 说明：累积确认统一由 una 表达（对端 rcv_nxt），选择性确认由 ack_list
-     * 表达。ACK 命令的 seq 字段不用于逐序号确认，避免把“期望序号”误认成
+    /* 累积确认 + 选择性确认 + 快速重传标记。
+     * 说明：累积确认统一由 una 表达（对端 rcv_nxt），选择性确认由 ack_list
+     * 表达；ACK 命令的 seq 字段不用于逐序号确认，避免把“期望序号”误认成
      * “已收序号”导致确认空洞。 */
+    new_ack = kcp_process_acks(k, &h, list, now_ms);
 
     kcp_advance_una(k);
     if (new_ack) {

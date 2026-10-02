@@ -5,7 +5,7 @@
 #
 # 拓扑：veth sx0<->sx1；server 进程独占 sx1，client 进程独占 sx0。
 # 期间用 bpftool 展示两个进程各自的 XDP 程序与 sx_stats_map 计数。
-set -u
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${1:-$ROOT/build/test_latency}"
@@ -24,8 +24,12 @@ SHOLD=15000
 # 例：SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh
 TASKSET_S=""
 TASKSET_C=""
-[ -n "${SX_CPU_SERVER:-}" ] && TASKSET_S="taskset -c ${SX_CPU_SERVER}"
-[ -n "${SX_CPU_CLIENT:-}" ] && TASKSET_C="taskset -c ${SX_CPU_CLIENT}"
+if [ -n "${SX_CPU_SERVER:-}" ]; then
+    TASKSET_S="taskset -c ${SX_CPU_SERVER}"
+fi
+if [ -n "${SX_CPU_CLIENT:-}" ]; then
+    TASKSET_C="taskset -c ${SX_CPU_CLIENT}"
+fi
 
 log() { echo "[xdp_latency_2p] $*"; }
 
@@ -98,16 +102,16 @@ done
 echo "=============================================="
 
 log "等待 client 完成 ..."
-wait "$CPID"
-CRC=$?
+CRC=0
+wait "$CPID" || CRC=$?
 CPID=""
 log "client 退出码=$CRC"
 echo "----- client.log -----"
-cat "$CLOG" 2>/dev/null
+cat "$CLOG" 2>/dev/null || true
 
 kill "$SPID" 2>/dev/null || true
 wait "$SPID" 2>/dev/null || true
 SPID=""
 echo "----- server.log -----"
-cat "$SLOG" 2>/dev/null
+cat "$SLOG" 2>/dev/null || true
 exit $CRC

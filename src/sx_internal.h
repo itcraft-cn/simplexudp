@@ -43,6 +43,15 @@ enum sx_cmd {
 /* 头部之后可选的 ACK/NACK 序号列表条数上限（单包内）。 */
 #define SX_ACK_LIST_MAX 64
 
+/* 单端点最大链路数（含自动学习），防止无界增长/DoS。 */
+#define SX_MAX_PEERS 1024
+/* 单次 update 最多收取的报文数，避免长时间不收发导致定时器饥饿。 */
+#define SX_RX_BATCH_MAX 4096
+
+/* IPv4 组播地址判定（224.0.0.0/4）。 */
+#define SX_IP_CLASS_D_MASK 0xf0000000u
+#define SX_IP_CLASS_D_PREFIX 0xe0000000u
+
 /* 组播/广播：每来源的乱序重排深度与发送端历史条数上限。 */
 #define SX_GROUP_MAX_SRC 32
 #define SX_GROUP_REORDER 256
@@ -170,6 +179,8 @@ struct sx_io {
     int (*poll)(sx_io_t *io, int timeout_ms);
     /* 加入组播组（仅 UDP 后端实现；XDP 后端返回 SX_ERR_UNSUPPORTED）。 */
     int (*join_multicast)(sx_io_t *io, uint32_t group_ip, uint32_t local_ip);
+    /* 周期性维护（可选）：ARP 老化/重试等。可为 NULL。 */
+    void (*update)(sx_io_t *io, uint64_t now_ms);
     void (*close)(sx_io_t *io);
 };
 
@@ -367,6 +378,10 @@ struct sx_endpoint {
     int thread_started;
     volatile int stop_flag;
     pthread_mutex_t lock;
+    /* 日志回调序列化锁（避免多线程并发回调宿主）。 */
+    pthread_mutex_t log_lock;
+    /* cfg.ifname 的私有副本，避免调用方释放原字符串导致悬垂。 */
+    char *ifname_owned;
 };
 
 /* 内部 API：__ 前缀。 */

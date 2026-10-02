@@ -21,8 +21,16 @@ MULTIARCH := $(shell $(CC) -print-multiarch 2>/dev/null || echo $(ARCH)-linux-gn
 
 SX_NO_XDP ?= 0
 SX_LOSSY  ?= 0
+DEBUG     ?= 0
 
-CFLAGS    ?= -std=c99 -O2 -g
+ifeq ($(DEBUG),1)
+  OPT := -O0 -g -DDEBUG
+else
+  OPT := -O2 -g
+endif
+
+CFLAGS    ?= -std=c99
+CFLAGS    += $(OPT)
 WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual
 # -MMD -MP：生成头文件依赖，避免修改头文件后漏编译导致 ABI/布局不一致。
 DEPFLAGS   = -MMD -MP
@@ -64,14 +72,28 @@ STATIC_LIB := $(BUILD)/libsimplexudp.a
 SHARED_LIB := $(BUILD)/libsimplexudp.so
 
 EXAMPLES   := $(BUILD)/sx_p2p $(BUILD)/sx_group
-TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback
+TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback $(BUILD)/test_recv
 
 # 直接编译链接的测试/示例需显式依赖头文件。
 HEADERS := include/simplexudp.h src/sx_internal.h tests/sx_test.h
 $(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency $(BUILD)/test_throughput: $(HEADERS)
 
-.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput check check-xdp check-latency check-latency-2p clean
+PREFIX ?= /usr/local
+DESTDIR ?=
+
+.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput check check-xdp check-latency check-latency-2p install uninstall clean
 all: $(STATIC_LIB) $(SHARED_LIB)
+
+install: all
+	install -d $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib
+	install -m 644 include/simplexudp.h $(DESTDIR)$(PREFIX)/include/
+	install -m 644 $(STATIC_LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -m 755 $(SHARED_LIB) $(DESTDIR)$(PREFIX)/lib/
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/include/simplexudp.h
+	rm -f $(DESTDIR)$(PREFIX)/lib/libsimplexudp.a
+	rm -f $(DESTDIR)$(PREFIX)/lib/libsimplexudp.so
 
 bpf: $(BPF_OBJ)
 
@@ -121,6 +143,7 @@ check: tests
 	@$(BUILD)/test_proto  $(BUILD)/test_proto.log;  echo "test_proto  exit=$$?"
 	@$(BUILD)/test_kcp    $(BUILD)/test_kcp.log;    echo "test_kcp    exit=$$?"
 	@$(BUILD)/test_loopback $(BUILD)/test_loopback.log; echo "test_loopback exit=$$?"
+	@$(BUILD)/test_recv   $(BUILD)/test_recv.log;   echo "test_recv   exit=$$?"
 
 # 需要 root：创建 veth 并跑 AF_XDP 端到端测试。
 check-xdp: tests-xdp

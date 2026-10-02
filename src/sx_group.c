@@ -16,6 +16,7 @@
 #include <string.h>
 
 #define SX_GROUP_NACK_INTERVAL_MS 20u
+#define SX_GROUP_ADV_MS 200u
 #define SX_GROUP_SRC_TIMEOUT_MS 120000u
 
 typedef struct sx_grx {
@@ -45,6 +46,8 @@ struct sx_group {
     sx_grx_t src[SX_GROUP_MAX_SRC];
 
     uint64_t last_send_ms;
+    uint64_t last_adv_ms; /* 上次广播高水位时间 */
+    uint32_t adv_snd;     /* 上次广播的高水位（避免空闲时反复广播） */
     int hello_sent;
 };
 
@@ -147,6 +150,8 @@ void sx_group_reset(sx_group_t *g) {
         memset(&g->src[s], 0, sizeof(g->src[s]));
     }
     g->snd_nxt = 0;
+    g->adv_snd = 0;
+    g->last_adv_ms = 0;
     g->hello_sent = 0;
 }
 
@@ -227,7 +232,8 @@ static void group_deliver(sx_group_t *g, sx_grx_t *s, sx_msg_t *slot) {
 
 static void group_drain(sx_group_t *g, sx_grx_t *s) {
     uint32_t mask = SX_GROUP_REORDER - 1u;
-    for (;;) {
+    uint32_t guard;
+    for (guard = 0; guard < SX_GROUP_REORDER; guard++) {
         sx_msg_t *slot = &s->ring[s->rcv_nxt & mask];
         if (slot->seq != s->rcv_nxt || slot->flags != SX_MSG_USED) {
             break;
@@ -410,10 +416,13 @@ void sx_group_update(sx_group_t *g, uint64_t now_ms) {
             group_send_nack(g, s);
         }
     }
-    /* 周期性广播高水位，使接收端能侦测“尾部丢包”。 */
-    if (g->snd_nxt > 0 && now_ms - g->last_send_ms >= SX_GROUP_NACK_INTERVAL_MS) {
+    /* 周期性广播高水位（使接收端侦测尾部丢包）。周期由 20ms 放宽到
+     * SX_GROUP_ADV_MS，降低 chatter，同时保证末尾高水位可被重复通告。 */
+    if (g->snd_nxt > 0 && now_ms - g->last_adv_ms >= SX_GROUP_ADV_MS) {
         sx_group_send_raw(g, SX_CMD_WINS, 0, g->snd_nxt, 0, NULL, 0, NULL, 0,
                           group_dst_ip(g), group_dst_port(g));
+        g->adv_snd = g->snd_nxt;
+        g->last_adv_ms = now_ms;
     }
     keepalive = g->ep->cfg.keepalive_ms ? g->ep->cfg.keepalive_ms : 10000u;
     if (now_ms - g->last_send_ms >= keepalive) {

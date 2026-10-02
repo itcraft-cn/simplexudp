@@ -80,7 +80,7 @@ target_link_libraries(sx_group PRIVATE simplexudp ${LIBBPF_LIBRARIES}
                                               ${LIBXDP_LIBRARIES} pthread)
 
 enable_testing()
-foreach(t frame proto kcp loopback)
+foreach(t frame proto kcp loopback recv)
     add_executable(test_${t} tests/test_${t}.c)
     target_include_directories(test_${t} PRIVATE src)
     target_link_libraries(test_${t} PRIVATE simplexudp ${LIBBPF_LIBRARIES}

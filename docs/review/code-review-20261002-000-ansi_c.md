@@ -151,3 +151,35 @@
 **审查工具**：rg + 人工/模型复核（DeepSeek V4.1 Flash）
 **规则来源**：`${AI_SPEC_ROOT}/lang-spec/spec.ansi_c.md`、`review.ansi_c.md`、`skills/code-review`
 **审查完成时间**：2026-10-02
+
+---
+
+## 修复记录（2026-10-02）
+
+| 编号 | 状态 | 修复要点 |
+| --- | --- | --- |
+| H1 | 已修复 | `add_link_common` 将组播/广播统一登记到 `mc_links`；路由守卫含 `bcast_link` |
+| H2 | 已修复 | `sx_stop` 幂等清理并 `free(mc_links)`；同时修复“未 start 就添加链路”的泄漏（valgrind 发现） |
+| H3 | 已修复 | `posix_memalign`/`xsk_umem__create` 失败路径释放 `umem_area`/`frame_addr` |
+| H4 | 已修复 | XDP 后端要求 `local_port != 0`，否则拒绝并记录错误 |
+| H5 | 已修复 | `ep_add_link` 限制 `SX_MAX_PEERS=1024`，超限拒绝并告警 |
+| M1 | 已修复 | `sx_recv` 返回完整长度（>cap 表示截断）；头文件与手册同步 |
+| M2 | 已修复 | 新增 `sx_io.update` 回调，XDP 后端驱动 `sx_arp_update`（ARP 老化/重试） |
+| M3 | 已修复 | `sx_kcp_send` malloc 失败时复位 slot |
+| M4 | 已修复 | `sx_update` 内部加锁（递归锁）；线程契约写入头文件与手册 |
+| M5 | 已修复 | `ifname` `strdup` 私有化，`sx_destroy` 释放 |
+| M6 | 已修复 | `mc_links` realloc 失败时回滚链路，保持状态一致 |
+| M7 | 已修复 | 脚本 `set -euo pipefail`，修正 `rc` 捕获与 `cat || true` |
+| L1 | 已修复 | `kcp_drain`/`group_drain`/`ep_drain_rx`/`xdp_recvfrom` 改为有界循环 |
+| L2 | 已修复 | 组播判定改用 `SX_IP_CLASS_D_MASK/PREFIX` |
+| L3 | 已修复 | 抽出 `kcp_process_acks`、`xdp_open_object`、`xdp_attach_program` |
+| L4 | 已修复 | 新增 `log_lock` 序列化日志回调 |
+| L5 | 已修复 | 组播高水位广播由 20ms 放宽到 200ms（保证末尾可靠通告） |
+| L6 | 已修复 | `sx_link_remove` 内层循环改用 `j` |
+| L7 | 已修复 | 移除按名称判后端（随 M2 的空实现一并删除） |
+| L8 | 已修复 | Makefile 增加 `DEBUG` 与 `install`/`uninstall` |
+
+新增回归测试：`tests/test_recv.c`（`sx_recv` 截断语义、广播链路登记）。
+
+验证结果：`make check` 5/5；`make check-xdp` PASS；`make check-latency` / `check-latency-2p` PASS；
+valgrind（test_kcp/test_loopback/test_recv）无泄漏；CMake `ctest` 5/5；`sx_group` 连续 5 次 PASS。

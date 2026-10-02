@@ -34,5 +34,8 @@ void sx_log(sx_endpoint_t *ep, sx_log_level_t level, const char *fmt, ...) {
     (void)vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
+    /* 序列化日志回调：可能被网络线程与应用线程并发触发。 */
+    pthread_mutex_lock(&ep->log_lock);
     ep->cfg.on_log(level, buf, ep->cfg.user);
+    pthread_mutex_unlock(&ep->log_lock);
 }

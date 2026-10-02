@@ -7,7 +7,7 @@
 #   1. 创建 veth 对 sx0<->sx1，配置 IP 并 UP；
 #   2. 运行 test_xdp（AF_XDP 后端，generic/native 自动侦测）；
 #   3. 清理 veth 与残留 XDP 程序。
-set -u
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${1:-$ROOT/build/test_xdp}"
@@ -47,9 +47,10 @@ sysctl -w net.ipv4.conf."$IF0".rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf."$IF1".rp_filter=0 >/dev/null 2>&1 || true
 
 log "运行 test_xdp ..."
-SX_LOG="$ROOT/build/test_xdp.log" "$BIN" "$IF0" "$IF1" "$IP0" "$IP1" 30000
-rc=$?
+rc=0
+SX_LOG="$ROOT/build/test_xdp.log" "$BIN" "$IF0" "$IF1" "$IP0" "$IP1" 30000 \
+    || rc=$?
 log "退出码=$rc"
 echo "----- test_xdp.log -----"
-cat "$ROOT/build/test_xdp.log" 2>/dev/null
+cat "$ROOT/build/test_xdp.log" 2>/dev/null || true
 exit $rc

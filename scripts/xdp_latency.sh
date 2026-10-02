@@ -2,7 +2,7 @@
 # xdp_latency.sh - 在 veth 上测 AF_XDP 时延，并用 bpftool 佐证流量经过 XDP
 #
 # 用法：sudo scripts/xdp_latency.sh [build/test_latency]
-set -u
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${1:-$ROOT/build/test_latency}"
@@ -84,10 +84,10 @@ done
 echo "=============================================="
 
 log "等待测试完成 ..."
-wait "$PID"
+rc=0
+wait "$PID" || rc=$?
 PID=""
-rc=$?
 log "退出码=$rc"
 echo "----- test_latency.log -----"
-cat "$LOG" 2>/dev/null
+cat "$LOG" 2>/dev/null || true
 exit $rc

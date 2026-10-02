@@ -194,7 +194,7 @@ typedef struct sx_config {
     uint32_t timeout_ms;   /* 对端超时判定，默认 30000 */
 
     /* ---- 运行模式 ---- */
-    int rx_thread;         /* 1 = 库启动内部收发/定时线程 */
+    int rx_thread;         /* 1 = 库启动内部收发/定时线程；回调内可安全调用 sx_send */
 
     /* ---- UMEM（XDP）---- */
     uint32_t umem_frames;  /* UMEM 帧数，默认 4096 */
@@ -229,7 +229,8 @@ int sx_start(sx_endpoint_t *ep);
 int sx_stop(sx_endpoint_t *ep);
 
 /* 驱动一次：收发报文 + 处理定时器。now_ms 为单调毫秒；0 表示库内部取时。
- * 非 rx_thread 模式必须周期性调用（建议每 1~10ms）。返回处理的事件数或负错误码。 */
+ * 非 rx_thread 模式必须周期性调用（建议每 1~10ms 或配合 sx_wait）。
+ * 内部加锁，可在多个线程并发调用；返回处理的事件数或负错误码。 */
 int sx_update(sx_endpoint_t *ep, uint64_t now_ms);
 
 /* 阻塞运行直到 sx_stop 或收到信号（内部循环 sx_update）。timeout_ms<0 表示一直运行。 */
@@ -265,7 +266,8 @@ int64_t sx_send_to(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
                    const void *data, size_t len);
 
 /* 拉取模式接收：取出一条按序消息。
- * 返回长度（>=0），无数据返回 SX_ERR_AGAIN；link_out/src 可为 NULL。 */
+ * 返回“完整消息长度”（可能大于 cap，表示本次被截断，调用方据此判断是否丢数据）；
+ * 无数据返回 SX_ERR_AGAIN；src_out/link_out 可为 NULL。 */
 ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap,
                 sx_addr_t *src_out, sx_link_t **link_out);
 

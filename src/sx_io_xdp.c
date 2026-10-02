@@ -66,6 +66,7 @@ extern const unsigned int sx_xdp_kern_o_len;
 #define SX_XDP_UMEM_FRAMES_DEFAULT 4096u
 #define SX_XDP_FRAME_SIZE_DEFAULT 4096u
 #define SX_XDP_RX_BATCH 1u
+#define SX_XDP_RX_LOOP_MAX 1024u /* 单次 recvfrom 内最多处理的帧数 */
 #define SX_XDP_INVALID_FRAME ((uint64_t)~0ull)
 
 typedef struct sx_xdp_config_kern {
@@ -243,7 +244,7 @@ static int xdp_resolve_mac(sx_xdp_priv_t *p, uint32_t dst_ip, uint8_t mac[6]) {
         memset(mac, 0xff, 6);
         return SX_OK;
     }
-    if ((dst_ip & 0xf0000000u) == 0xe0000000u) {
+    if ((dst_ip & SX_IP_CLASS_D_MASK) == SX_IP_CLASS_D_PREFIX) {
         xdp_mcast_mac(dst_ip, mac);
         return SX_OK;
     }
@@ -302,7 +303,9 @@ static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
     }
     p = (sx_xdp_priv_t *)io->priv;
 
-    for (;;) {
+    {
+        uint32_t guard;
+        for (guard = 0; guard < SX_XDP_RX_LOOP_MAX; guard++) {
         uint32_t idx = 0;
         uint32_t n;
         uint64_t addr;
@@ -350,7 +353,19 @@ static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
         /* 非目标帧（理论上 XDP 程序已过滤），丢弃继续。 */
         xdp_frame_release(p, addr);
         xsk_ring_cons__release(&p->rx, 1);
+        } /* guard loop */
     }
+    return 0;
+}
+
+static void xdp_update(sx_io_t *io, uint64_t now_ms) {
+    sx_xdp_priv_t *p;
+    if (io == NULL || io->priv == NULL) {
+        return;
+    }
+    p = (sx_xdp_priv_t *)io->priv;
+    /* ARP 老化/重试（ARP 实例私有于 xdp 后端）。 */
+    sx_arp_update(p->arp, now_ms);
 }
 
 static int xdp_poll(sx_io_t *io, int timeout_ms) {
@@ -422,11 +437,9 @@ static int xdp_bind_socket(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     return SX_OK;
 }
 
-/* 加载并 attach XDP 重定向程序。 */
-static int xdp_load_program(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
-    struct bpf_object *obj = NULL;
-    struct bpf_program *prog;
-    struct bpf_map *map;
+/* 打开 XDP 目标对象：优先环境变量 SX_XDP_OBJ，其次编译期内嵌对象。 */
+static struct bpf_object *xdp_open_object(sx_endpoint_t *ep) {
+    struct bpf_object *obj;
     long err;
     const char *path = getenv("SX_XDP_OBJ");
 
@@ -435,24 +448,64 @@ static int xdp_load_program(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
         err = libbpf_get_error(obj);
         if (err != 0) {
             sx_log(ep, SX_LOG_ERROR, "open xdp obj %s failed: %ld", path, err);
-            obj = NULL;
-            return SX_ERR_BACKEND;
+            return NULL;
         }
-    } else {
-#ifdef SX_XDP_EMBEDDED
-        obj = bpf_object__open_mem(sx_xdp_kern_o, sx_xdp_kern_o_len, NULL);
-        err = libbpf_get_error(obj);
-        if (err != 0) {
-            sx_log(ep, SX_LOG_ERROR, "open embedded xdp obj failed: %ld", err);
-            obj = NULL;
-            return SX_ERR_BACKEND;
-        }
-#else
-        sx_log(ep, SX_LOG_ERROR, "no xdp object (set SX_XDP_OBJ)");
-        return SX_ERR_BACKEND;
-#endif
+        return obj;
     }
+#ifdef SX_XDP_EMBEDDED
+    obj = bpf_object__open_mem(sx_xdp_kern_o, sx_xdp_kern_o_len, NULL);
+    err = libbpf_get_error(obj);
+    if (err != 0) {
+        sx_log(ep, SX_LOG_ERROR, "open embedded xdp obj failed: %ld", err);
+        return NULL;
+    }
+    return obj;
+#else
+    sx_log(ep, SX_LOG_ERROR, "no xdp object (set SX_XDP_OBJ)");
+    return NULL;
+#endif
+}
 
+/* 选择 attach 模式：native 优先，失败回退 generic。 */
+static int xdp_attach_program(sx_xdp_priv_t *p, sx_endpoint_t *ep,
+                              struct bpf_program *prog) {
+    unsigned int modes[2];
+    int nmodes = 0;
+    int i;
+
+    if (ep->cfg.xdp_mode == SX_XDP_MODE_NATIVE) {
+        modes[nmodes++] = XDP_FLAGS_DRV_MODE;
+    } else if (ep->cfg.xdp_mode == SX_XDP_MODE_GENERIC) {
+        modes[nmodes++] = XDP_FLAGS_SKB_MODE;
+    } else {
+        modes[nmodes++] = XDP_FLAGS_DRV_MODE;
+        modes[nmodes++] = XDP_FLAGS_SKB_MODE;
+    }
+    for (i = 0; i < nmodes; i++) {
+        unsigned int flags = modes[i] | XDP_FLAGS_UPDATE_IF_NOEXIST;
+        if (bpf_xdp_attach(p->ifindex, bpf_program__fd(prog), flags, NULL) == 0) {
+            p->attach_flags = modes[i];
+            p->attached = 1;
+            ep->stats.xdp_mode = (modes[i] == XDP_FLAGS_SKB_MODE)
+                                     ? SX_XDP_MODE_GENERIC
+                                     : SX_XDP_MODE_NATIVE;
+            return SX_OK;
+        }
+    }
+    sx_log(ep, SX_LOG_ERROR, "bpf_xdp_attach failed on %s", p->ifname);
+    return SX_ERR_BACKEND;
+}
+
+/* 加载并 attach XDP 重定向程序。 */
+static int xdp_load_program(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
+    struct bpf_object *obj;
+    struct bpf_program *prog;
+    struct bpf_map *map;
+
+    obj = xdp_open_object(ep);
+    if (obj == NULL) {
+        return SX_ERR_BACKEND;
+    }
     if (bpf_object__load(obj) != 0) {
         sx_log(ep, SX_LOG_ERROR, "load xdp obj failed");
         bpf_object__close(obj);
@@ -477,36 +530,8 @@ static int xdp_load_program(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     p->sx_config_map_fd = bpf_map__fd(map);
 
     /* 选择 attach 模式：native 优先，失败回退 generic。 */
-    {
-        unsigned int modes[2];
-        int nmodes = 0;
-        int i;
-        if (ep->cfg.xdp_mode == SX_XDP_MODE_NATIVE) {
-            modes[nmodes++] = XDP_FLAGS_DRV_MODE;
-        } else if (ep->cfg.xdp_mode == SX_XDP_MODE_GENERIC) {
-            modes[nmodes++] = XDP_FLAGS_SKB_MODE;
-        } else {
-            modes[nmodes++] = XDP_FLAGS_DRV_MODE;
-            modes[nmodes++] = XDP_FLAGS_SKB_MODE;
-        }
-        for (i = 0; i < nmodes; i++) {
-            unsigned int flags = modes[i] | XDP_FLAGS_UPDATE_IF_NOEXIST;
-            int r = bpf_xdp_attach(p->ifindex, bpf_program__fd(prog), flags,
-                                   NULL);
-            if (r == 0) {
-                p->attach_flags = modes[i];
-                p->attached = 1;
-                ep->stats.xdp_mode = (modes[i] == XDP_FLAGS_SKB_MODE)
-                                         ? SX_XDP_MODE_GENERIC
-                                         : SX_XDP_MODE_NATIVE;
-                break;
-            }
-        }
-        if (!p->attached) {
-            sx_log(ep, SX_LOG_ERROR, "bpf_xdp_attach failed on %s",
-                   p->ifname);
-            return SX_ERR_BACKEND;
-        }
+    if (xdp_attach_program(p, ep, prog) != SX_OK) {
+        return SX_ERR_BACKEND;
     }
 
     /* 写入本端 UDP 端口供 XDP 程序匹配。 */
@@ -567,6 +592,11 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     if (ep == NULL || ep->cfg.ifname == NULL) {
         return NULL;
     }
+    /* XDP 程序按目的端口过滤，local_port 必须为非 0，否则永不重定向。 */
+    if (ep->cfg.local_port == 0) {
+        sx_log(ep, SX_LOG_ERROR, "xdp backend requires local_port != 0");
+        return NULL;
+    }
     io = (sx_io_t *)calloc(1, sizeof(*io));
     p = (sx_xdp_priv_t *)calloc(1, sizeof(*p));
     if (io == NULL || p == NULL) {
@@ -611,6 +641,7 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
 
     p->umem_size = (size_t)p->num_frames * p->frame_size;
     if (posix_memalign(&p->umem_area, 4096, p->umem_size) != 0) {
+        free(p->frame_addr);
         free(io);
         free(p);
         return NULL;
@@ -625,6 +656,8 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     ret = xsk_umem__create(&p->umem, p->umem_area, p->umem_size, &p->fq, &p->cq,
                            &ucfg);
     if (ret != 0) {
+        free(p->umem_area);
+        free(p->frame_addr);
         free(io);
         free(p);
         return NULL;
@@ -647,6 +680,7 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     io->recvfrom = xdp_recvfrom;
     io->poll = xdp_poll;
     io->join_multicast = xdp_join_multicast;
+    io->update = xdp_update;
     io->close = xdp_close;
 
     /* 将 xsk 注册到 xsks_map 对应队列，并回填实际端口。 */
