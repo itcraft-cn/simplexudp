@@ -112,3 +112,36 @@ sudo ./build/test_throughput xdp-client enp0s9 192.168.77.101 46100 192.168.77.1
 sudo /usr/sbin/bpftool net show dev enp0s9
 sudo /usr/sbin/bpftool map dump name sx_stats_map
 ```
+
+---
+
+## 6. 修复后回归（2026-10-02，提交 9a451b7）
+
+在同一 VM 环境用修复后的代码重跑（UDP 与 AF_XDP，吞吐双向）：
+
+### UDP
+
+| 项目 | 结果 |
+| --- | --- |
+| 时延（n=5000） | min=25 avg=160 p50=55 p99=946 max=102059 us（含一次约 102ms 的 RTO 回退） |
+| 吞吐 101->102 | 106.9 MB/s，76,358 msg/s，retrans=322,690，服务端 rx=500000 |
+| 吞吐 102->101 | 86.7 MB/s，61,924 msg/s，retrans=70,464，服务端 rx=500000 |
+
+零丢失；高重传仍来自接收端 UDP 缓冲溢出（VM 2 vCPU + 慢盘网络）。
+
+### AF_XDP（generic + copy）
+
+| 项目 | 结果 |
+| --- | --- |
+| 时延（n=5000） | min=20 avg=82 p50=52 p99=351 max=45792 us |
+| 吞吐 101->102 | 177.2 MB/s，126,598 msg/s，retrans=16，服务端 rx=200000（dup=0 reorder=0） |
+| 吞吐 102->101 | 185.9 MB/s，132,817 msg/s，retrans=220，服务端 rx=200000（dup=60 reorder=218） |
+| bpftool | enp0s9 generic id 56；sx_stats_map redirect 10436（时延）/ 200933（吞吐） |
+
+### 结论
+
+- 与修复前（第 3 节）相比**无回归**：XDP 吞吐 177~186 MB/s 与之前 175~203 同档；
+  UDP 106.9/86.7 MB/s 受 VM 抖动与缓冲影响略有波动，均零丢失。
+- AF_XDP 依旧优于内核 UDP（吞吐更高、重传近零）。
+- 注意：**单个网卡同时只能挂一个 XDP 端点**；双向测试需逐方向串行（server/client 分属两台主机），
+  不可在同一主机同一网卡上同时起 server 与 client（会因 XDP 程序冲突导致第二个端点启动失败）。
