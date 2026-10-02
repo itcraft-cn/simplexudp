@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
     cfg.on_recv = on_recv;
     cfg.user = &ctx;
     cfg.on_log = log_fn;
-    cfg.log_level = SX_LOG_WARN;
+    cfg.log_level = getenv("SX_DEBUG") ? SX_LOG_DEBUG : SX_LOG_WARN;
     cfg.recv_window = 4096;
 
     ep = sx_create(&cfg);

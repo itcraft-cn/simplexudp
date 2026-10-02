@@ -226,6 +226,10 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
                            sx_now_ms());
             return 1;
         }
+        sx_log(ep, SX_LOG_DEBUG,
+               "ep: group links=%zu but conv=%u no match (from %u.%u.%u.%u:%u)",
+               ep->nmc, h.conv, (src_ip >> 24) & 0xff, (src_ip >> 16) & 0xff,
+               (src_ip >> 8) & 0xff, src_ip & 0xff, src_port);
     }
 
     link = find_unicast(ep, src_ip, src_port);
@@ -257,6 +261,10 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
     }
     if (link == NULL || link->kcp == NULL) {
         ep->stats.dropped++;
+        sx_log(ep, SX_LOG_DEBUG,
+               "ep: no link for conv=%u from %u.%u.%u.%u:%u (links=%zu)",
+               h.conv, (src_ip >> 24) & 0xff, (src_ip >> 16) & 0xff,
+               (src_ip >> 8) & 0xff, src_ip & 0xff, src_port, ep->nlinks);
         return 0;
     }
     sx_kcp_input(link->kcp, seg, seg_len, sx_now_ms());
