@@ -81,7 +81,7 @@ $(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency $(BUILD)/test_throu
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput check check-xdp check-latency check-latency-2p install uninstall clean
+.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput group-tools check check-xdp check-latency check-latency-2p install uninstall clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 install: all
@@ -133,6 +133,7 @@ tests: $(TESTS)
 tests-xdp: $(BUILD)/test_xdp
 tests-latency: $(BUILD)/test_latency
 tests-throughput: $(BUILD)/test_throughput
+group-tools: $(BUILD)/test_gsend $(BUILD)/test_grecv
 
 $(BUILD)/test_%: tests/test_%.c $(STATIC_LIB) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< $(STATIC_LIB) -o $@ $(LDLIBS)

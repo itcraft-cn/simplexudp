@@ -226,6 +226,8 @@ sx_io_t *sx_io_udp_create(sx_endpoint_t *ep) {
     /* 仅 SO_REUSEADDR：允许多个组播成员绑定同一端口并各自收到副本。
      * 注意不要设置 SO_REUSEPORT，否则单播/组播可能被内核在多 socket 间负载均衡。 */
     (void)setsockopt(p->sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    /* 允许发送广播（如 255.255.255.255 / 子网广播）。 */
+    (void)setsockopt(p->sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
     if (ep->cfg.ifname != NULL && ep->cfg.ifname[0] != '\0') {
         (void)setsockopt(p->sock, SOL_SOCKET, SO_BINDTODEVICE, ep->cfg.ifname,
                          strlen(ep->cfg.ifname));
