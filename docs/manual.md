@@ -169,6 +169,12 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `send_window` | 256 | 发送窗口（消息数），同时决定发送环容量 |
 | `recv_window` | 1024 | 接收窗口/乱序重排容量 |
 | `group_history` | 1024 | 组播/广播发送历史条数（NACK 恢复用） |
+| `group_reorder` | 256 | 组播/广播接收重排窗口（向上取 2 的幂） |
+| `group_max_src` | 32 | 组播/广播来源表大小 |
+| `max_peers` | 1024 | 单端点最大链路数（含自动学习） |
+| `rx_batch` | 4096 | 单次 `sx_update` 最多收包数 |
+| `pool_blocks` | 0 | 热路径内存池块数（0=按发送/接收窗口自动推导） |
+| `multicast_if` | 0 | 组播出口/入组接口 IPv4（多网卡必需）；0=默认接口 |
 | `min_rto_ms` | 100 | 最小重传超时 |
 | `max_rto_ms` | 5000 | 最大重传超时 |
 | `keepalive_ms` | 10000 | 空闲心跳间隔 |
@@ -253,6 +259,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 便捷发送：自动创建/复用对应点播链路后发送。
 
 #### `ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out, sx_link_t **link_out)`
+**注意：请始终提供 `cap >= sx_max_payload(ep)` 的缓冲区。** 语义为“要么完整接收、要么丢弃”。
 拉取模式接收一条按序消息。返回**完整消息长度**：若返回值大于 `cap`，说明本次被截断，
 调用方应据此处理（放大缓冲或丢弃）；无数据返回 `SX_ERR_AGAIN`；`src_out`/`link_out` 可为 NULL。
 仅在使用拉取模式（`on_recv=NULL`）时使用。
@@ -319,7 +326,7 @@ void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 
 - 流量：`tx_packets/tx_bytes/rx_packets/rx_bytes`
 - 可靠性：`retransmits`、`fast_retrans`、`timeouts`、`dup_packets`、`reorder_pkts`、
-  `lost_detected`、`nack_sent/nack_recv`、`dropped`
+  `lost_detected`、`nack_sent/nack_recv`、`dropped`、`xdp_rx_backlog`（XDP：UMEM 帧耗尽/RX 积压计数）
 - 窗口/时延：`snd_wnd`、`snd_outstanding`、`per_peer_wnd`、`cwnd`、`rtt_ms`、`rto_ms`
 - 后端：`backend`、`xdp_mode`、`xdp_bind`
 

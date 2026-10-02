@@ -43,10 +43,13 @@ enum sx_cmd {
 /* 头部之后可选的 ACK/NACK 序号列表条数上限（单包内）。 */
 #define SX_ACK_LIST_MAX 64
 
-/* 单端点最大链路数（含自动学习），防止无界增长/DoS。 */
+/* 单端点最大链路数（含自动学习），防止无界增长/DoS（默认值，可配置）。 */
 #define SX_MAX_PEERS 1024
-/* 单次 update 最多收取的报文数，避免长时间不收发导致定时器饥饿。 */
+/* 单次 update 最多收取的报文数（默认值，可配置）。 */
 #define SX_RX_BATCH_MAX 4096
+
+/* UDP 净荷上限（含 SX 头与 ack_list）：1500-14-20-8 = 1458。 */
+#define SX_UDP_PAYLOAD_MAX 1458
 
 /* IPv4 组播地址判定（224.0.0.0/4）。 */
 #define SX_IP_CLASS_D_MASK 0xf0000000u
@@ -105,6 +108,26 @@ uint64_t sx_now_ms(void);
 
 /* 库内日志。禁止 stdout/stderr。 */
 void sx_log(sx_endpoint_t *ep, sx_log_level_t level, const char *fmt, ...);
+
+/* ------------------------------------------------------------------ */
+/* 定长块内存池（热路径缓冲复用）                                      */
+/* ------------------------------------------------------------------ */
+
+/* 预分配 nblocks 个大小为 bsz 的块；alloc 优先从池取，池空或 len>bsz 时
+ * 回退 malloc（保证正确性），free 依据指针是否落在池区间决定归还池或 free。
+ * 目的：让稳定状态下的收发热路径不再调用 malloc/free。 */
+typedef struct sx_pool {
+    uint8_t *base;
+    uint32_t bsz;
+    uint32_t nblocks;
+    uint32_t nfree;
+    uint32_t *free_idx;
+} sx_pool_t;
+
+int sx_pool_init(sx_pool_t *p, uint32_t bsz, uint32_t nblocks);
+void sx_pool_destroy(sx_pool_t *p);
+void *sx_pool_alloc(sx_pool_t *p, size_t len);
+void sx_pool_free(sx_pool_t *p, void *ptr);
 
 /* ------------------------------------------------------------------ */
 /* 网络校验和/字节序工具（sx_frame.c）                                 */
@@ -312,7 +335,8 @@ void sx_kcp_update(sx_kcp_t *k, uint64_t now_ms);
 typedef struct sx_group sx_group_t;
 
 sx_group_t *sx_group_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
-                            uint32_t history, uint32_t reorder);
+                            uint32_t history, uint32_t reorder,
+                            uint32_t max_src);
 void sx_group_destroy(sx_group_t *g);
 void sx_group_reset(sx_group_t *g);
 int64_t sx_group_send(sx_group_t *g, const void *data, size_t len);
@@ -370,6 +394,15 @@ struct sx_endpoint {
     sx_rx_item_t *rx_tail;
     size_t rx_count;
 
+    /* 回调投递队列：update 内在锁内入队，解锁后统一调用 on_recv，
+     * 避免用户回调在端点锁内执行（并发契约更清晰）。 */
+    sx_rx_item_t *cb_head;
+    sx_rx_item_t *cb_tail;
+    size_t cb_count;
+
+    /* 热路径内存池。 */
+    sx_pool_t pool;
+
     int running;
     int backend_chosen;
 
@@ -386,6 +419,8 @@ struct sx_endpoint {
 
 /* 内部 API：__ 前缀。 */
 void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link);
+/* 取出回调队列并在锁外调用 on_recv（供 sx_update 与直接驱动场景使用）。 */
+void sx_ep_flush(sx_endpoint_t *ep);
 void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
                    uint16_t src_port, const void *data, size_t len);
 void sx_kcp_send_raw(sx_kcp_t *k, uint8_t cmd, uint32_t seq, uint32_t una,

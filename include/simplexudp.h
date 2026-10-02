@@ -136,6 +136,7 @@ typedef struct sx_stats {
     uint64_t nack_sent;
     uint64_t nack_recv;
     uint64_t dropped;       /* 因窗口满/校验失败等丢弃 */
+    uint64_t xdp_rx_backlog;/* XDP：单次处理达到上限，RX 环仍有积压的次数 */
     uint32_t snd_wnd;       /* 当前发送窗口可用 */
     uint32_t snd_outstanding;/* 在途未确认消息数 */
     uint32_t per_peer_wnd;  /* 对端通告窗口 */
@@ -189,6 +190,11 @@ typedef struct sx_config {
     uint32_t send_window;  /* 发送窗口（消息数），默认 256 */
     uint32_t recv_window;  /* 接收窗口/重排缓冲（消息数），默认 1024 */
     uint32_t group_history;/* 组播/广播历史条数，默认 1024 */
+    uint32_t group_reorder;/* 组播/广播乱序重排窗口，默认 256 */
+    uint32_t group_max_src;/* 组播/广播来源表大小，默认 32 */
+    uint32_t max_peers;    /* 单端点最大链路数，默认 1024 */
+    uint32_t rx_batch;     /* 单次 sx_update 最多收包数，默认 4096 */
+    uint32_t pool_blocks;  /* 热路径内存池块数，0=按窗口自动推导 */
     uint32_t min_rto_ms;   /* 最小 RTO，默认 100 */
     uint32_t max_rto_ms;   /* 最大 RTO，默认 5000 */
     uint32_t keepalive_ms; /* 空闲心跳间隔，默认 10000 */
@@ -267,7 +273,12 @@ int64_t sx_send_to(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
                    const void *data, size_t len);
 
 /* 拉取模式接收：取出一条按序消息。
- * 返回“完整消息长度”（可能大于 cap，表示本次被截断，调用方据此判断是否丢数据）；
+ *
+ * 重要：请始终提供 cap >= sx_max_payload(ep) 的缓冲区。语义为“要么完整接收、
+ * 要么丢弃”：若某条消息长度大于 cap，则只拷贝 cap 字节，剩余部分被丢弃，
+ * 同时返回值为该消息的“完整长度”（> cap），调用方据此可察觉发生了截断。
+ * 没有 buffer 超过 max_payload 时不会截断。
+ *
  * 无数据返回 SX_ERR_AGAIN；src_out/link_out 可为 NULL。 */
 ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap,
                 sx_addr_t *src_out, sx_link_t **link_out);

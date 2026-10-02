@@ -58,7 +58,8 @@ struct {
 static __always_inline void sx_stat_inc(__u32 key) {
     __u64 *v = bpf_map_lookup_elem(&sx_stats_map, &key);
     if (v) {
-        __sync_fetch_and_add(v, 1);
+        /* per-CPU map：本 CPU 独占该 value，无需原子操作。 */
+        (*v)++;
     }
 }
 

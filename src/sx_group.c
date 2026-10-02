@@ -8,7 +8,8 @@
  *
  * 注意：
  *   - 组播/广播无法汇聚多方 ACK，故不提供严格可靠保证，仅尽力恢复。
- *   - 序号回绕与窗口边界：历史窗口小于等于 hist_cap，超出范围不再重发。
+ *   - 重排窗口/来源表大小来自配置（group_reorder/group_max_src），运行期可调。
+ *   - 数据缓冲取自端点内存池，稳定状态不再调用 malloc/free。
  */
 #include "sx_internal.h"
 
@@ -18,6 +19,7 @@
 #define SX_GROUP_NACK_INTERVAL_MS 20u
 #define SX_GROUP_ADV_MS 200u
 #define SX_GROUP_SRC_TIMEOUT_MS 120000u
+#define SX_GROUP_REORDER_MIN 16u
 
 typedef struct sx_grx {
     uint32_t ip;
@@ -26,7 +28,7 @@ typedef struct sx_grx {
     uint32_t rcv_nxt;
     uint32_t peer_max;  /* 对端高水位（下一待分配序号），用于尾部丢包侦测 */
     uint32_t count;
-    sx_msg_t ring[SX_GROUP_REORDER];
+    sx_msg_t *ring;     /* 长度 = g->reorder（2 的幂） */
     uint64_t last_recv_ms;
     uint64_t last_nack_ms;
 } sx_grx_t;
@@ -43,7 +45,9 @@ struct sx_group {
     sx_msg_t *hist;
 
     /* 接收（按来源）。 */
-    sx_grx_t src[SX_GROUP_MAX_SRC];
+    sx_grx_t *src;
+    uint32_t max_src;
+    uint32_t reorder; /* 2 的幂 */
 
     uint64_t last_send_ms;
     uint64_t last_adv_ms; /* 上次广播高水位时间 */
@@ -68,6 +72,13 @@ void sx_group_send_raw(sx_group_t *g, uint8_t cmd, uint32_t seq, uint32_t una,
     }
     if (payload_len > g->ep->cfg.max_payload) {
         return;
+    }
+    /* MTU 联合预算：SX 头 + ack_list + 净荷 必须 <= UDP 净荷上限。 */
+    {
+        size_t budget = SX_UDP_PAYLOAD_MAX - SX_HDR_SIZE - payload_len;
+        if ((size_t)list_count * 4u > budget) {
+            list_count = (uint32_t)(budget / 4u);
+        }
     }
     memset(&h, 0, sizeof(h));
     h.cmd = cmd;
@@ -101,10 +112,12 @@ static uint32_t group_dst_ip(sx_group_t *g) { return g->link->addr.ip; }
 static uint16_t group_dst_port(sx_group_t *g) { return g->link->addr.port; }
 
 sx_group_t *sx_group_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
-                            uint32_t history, uint32_t reorder) {
+                            uint32_t history, uint32_t reorder,
+                            uint32_t max_src) {
     sx_group_t *g;
     uint32_t hcap;
-    SX_UNUSED(reorder);
+    uint32_t rcap;
+    uint32_t i;
 
     if (ep == NULL || link == NULL) {
         return NULL;
@@ -117,37 +130,70 @@ sx_group_t *sx_group_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
     if (hcap == 0) {
         hcap = 1024u;
     }
+    rcap = sx_round_pow2(reorder > 0 ? reorder : 256u);
+    if (rcap < SX_GROUP_REORDER_MIN) {
+        rcap = SX_GROUP_REORDER_MIN;
+    }
+    if (max_src == 0) {
+        max_src = 32;
+    }
+
     g->hist = (sx_msg_t *)calloc(hcap, sizeof(sx_msg_t));
-    if (g->hist == NULL) {
+    g->src = (sx_grx_t *)calloc(max_src, sizeof(sx_grx_t));
+    if (g->hist == NULL || g->src == NULL) {
+        free(g->hist);
+        free(g->src);
         free(g);
         return NULL;
+    }
+    for (i = 0; i < max_src; i++) {
+        g->src[i].ring = (sx_msg_t *)calloc(rcap, sizeof(sx_msg_t));
+        if (g->src[i].ring == NULL) {
+            uint32_t j;
+            for (j = 0; j < i; j++) {
+                free(g->src[j].ring);
+            }
+            free(g->hist);
+            free(g->src);
+            free(g);
+            return NULL;
+        }
     }
     g->ep = ep;
     g->link = link;
     g->conv = conv;
     g->local_id = (uint32_t)(++ep->next_local_id);
     g->hist_cap = hcap;
+    g->reorder = rcap;
+    g->max_src = max_src;
     return g;
 }
 
 void sx_group_reset(sx_group_t *g) {
     uint32_t i;
-    int s;
+    uint32_t s;
     if (g == NULL) {
         return;
     }
     for (i = 0; i < g->hist_cap; i++) {
-        free(g->hist[i].data);
+        sx_pool_free(&g->ep->pool, g->hist[i].data);
         g->hist[i].data = NULL;
     }
     memset(g->hist, 0, g->hist_cap * sizeof(sx_msg_t));
-    for (s = 0; s < SX_GROUP_MAX_SRC; s++) {
-        int r;
-        for (r = 0; r < SX_GROUP_REORDER; r++) {
-            free(g->src[s].ring[r].data);
-            g->src[s].ring[r].data = NULL;
+    for (s = 0; s < g->max_src; s++) {
+        uint32_t r;
+        sx_grx_t *sr = &g->src[s];
+        for (r = 0; r < g->reorder; r++) {
+            sx_pool_free(&g->ep->pool, sr->ring[r].data);
+            sr->ring[r].data = NULL;
         }
-        memset(&g->src[s], 0, sizeof(g->src[s]));
+        memset(sr->ring, 0, g->reorder * sizeof(sx_msg_t));
+        sr->used = 0;
+        sr->rcv_nxt = 0;
+        sr->peer_max = 0;
+        sr->count = 0;
+        sr->last_recv_ms = 0;
+        sr->last_nack_ms = 0;
     }
     g->snd_nxt = 0;
     g->adv_snd = 0;
@@ -156,10 +202,17 @@ void sx_group_reset(sx_group_t *g) {
 }
 
 void sx_group_destroy(sx_group_t *g) {
+    uint32_t s;
     if (g == NULL) {
         return;
     }
     sx_group_reset(g);
+    if (g->src != NULL) {
+        for (s = 0; s < g->max_src; s++) {
+            free(g->src[s].ring);
+        }
+        free(g->src);
+    }
     free(g->hist);
     free(g);
 }
@@ -169,14 +222,14 @@ static void group_hist_store(sx_group_t *g, uint32_t seq, const void *data,
                              size_t len) {
     sx_msg_t *slot = &g->hist[seq & (g->hist_cap - 1u)];
     if (slot->data != NULL) {
-        free(slot->data);
+        sx_pool_free(&g->ep->pool, slot->data);
         slot->data = NULL;
     }
     slot->seq = seq;
     slot->len = (uint16_t)len;
     slot->flags = SX_MSG_USED;
     if (len > 0) {
-        slot->data = (uint8_t *)malloc(len);
+        slot->data = (uint8_t *)sx_pool_alloc(&g->ep->pool, len);
         if (slot->data != NULL) {
             memcpy(slot->data, data, len);
         } else {
@@ -204,19 +257,28 @@ int64_t sx_group_send(sx_group_t *g, const void *data, size_t len) {
 }
 
 static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
-    int i;
-    for (i = 0; i < SX_GROUP_MAX_SRC; i++) {
+    uint32_t i;
+    for (i = 0; i < g->max_src; i++) {
         if (g->src[i].used && g->src[i].ip == ip && g->src[i].port == port) {
             return &g->src[i];
         }
     }
-    for (i = 0; i < SX_GROUP_MAX_SRC; i++) {
+    for (i = 0; i < g->max_src; i++) {
         if (!g->src[i].used) {
             sx_grx_t *s = &g->src[i];
-            memset(s, 0, sizeof(*s));
+            uint32_t r;
+            for (r = 0; r < g->reorder; r++) {
+                sx_pool_free(&g->ep->pool, s->ring[r].data);
+                s->ring[r].data = NULL;
+            }
+            memset(s->ring, 0, g->reorder * sizeof(sx_msg_t));
             s->used = 1;
             s->ip = ip;
             s->port = port;
+            s->rcv_nxt = 0;
+            s->peer_max = 0;
+            s->count = 0;
+            s->last_nack_ms = 0;
             s->last_recv_ms = sx_now_ms();
             return s;
         }
@@ -231,15 +293,15 @@ static void group_deliver(sx_group_t *g, sx_grx_t *s, sx_msg_t *slot) {
 }
 
 static void group_drain(sx_group_t *g, sx_grx_t *s) {
-    uint32_t mask = SX_GROUP_REORDER - 1u;
+    uint32_t mask = g->reorder - 1u;
     uint32_t guard;
-    for (guard = 0; guard < SX_GROUP_REORDER; guard++) {
+    for (guard = 0; guard < g->reorder; guard++) {
         sx_msg_t *slot = &s->ring[s->rcv_nxt & mask];
         if (slot->seq != s->rcv_nxt || slot->flags != SX_MSG_USED) {
             break;
         }
         group_deliver(g, s, slot);
-        free(slot->data);
+        sx_pool_free(&g->ep->pool, slot->data);
         slot->data = NULL;
         slot->flags = SX_MSG_FREE;
         slot->seq = 0;
@@ -254,7 +316,7 @@ static void group_drain(sx_group_t *g, sx_grx_t *s) {
 static void group_send_nack(sx_group_t *g, sx_grx_t *s) {
     uint32_t list[SX_ACK_LIST_MAX];
     uint32_t n = 0;
-    uint32_t mask = SX_GROUP_REORDER - 1u;
+    uint32_t mask = g->reorder - 1u;
     uint32_t seq = s->rcv_nxt;
     uint32_t limit = (s->peer_max != 0) ? s->peer_max : s->rcv_nxt;
 
@@ -267,7 +329,7 @@ static void group_send_nack(sx_group_t *g, sx_grx_t *s) {
         list[n++] = seq;
         seq++;
         /* 最多看一个重排窗口。 */
-        if (seq - s->rcv_nxt >= SX_GROUP_REORDER) {
+        if (seq - s->rcv_nxt >= g->reorder) {
             break;
         }
     }
@@ -282,7 +344,7 @@ static void group_send_nack(sx_group_t *g, sx_grx_t *s) {
 
 static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
                              const uint8_t *payload) {
-    uint32_t mask = SX_GROUP_REORDER - 1u;
+    uint32_t mask = g->reorder - 1u;
     uint32_t seq = h->seq;
 
     if (seq == s->rcv_nxt) {
@@ -293,17 +355,18 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
         g->ep->stats.rx_bytes += h->payload_len;
         group_drain(g, s);
     } else if (sx_seq_after(seq, s->rcv_nxt) &&
-               (seq - s->rcv_nxt) < SX_GROUP_REORDER) {
+               (seq - s->rcv_nxt) < g->reorder) {
         sx_msg_t *slot = &s->ring[seq & mask];
         if (slot->seq == seq && slot->flags == SX_MSG_USED) {
             g->ep->stats.dup_packets++;
         } else {
             if (slot->data != NULL) {
-                free(slot->data);
+                sx_pool_free(&g->ep->pool, slot->data);
                 slot->data = NULL;
             }
             if (h->payload_len > 0) {
-                slot->data = (uint8_t *)malloc(h->payload_len);
+                slot->data = (uint8_t *)sx_pool_alloc(&g->ep->pool,
+                                                      h->payload_len);
                 if (slot->data == NULL) {
                     return;
                 }
@@ -389,25 +452,29 @@ void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
 }
 
 void sx_group_update(sx_group_t *g, uint64_t now_ms) {
-    int i;
+    uint32_t i;
     uint32_t keepalive;
 
     if (g == NULL) {
         return;
     }
     /* 对存在空洞的来源周期性重发 NACK。 */
-    for (i = 0; i < SX_GROUP_MAX_SRC; i++) {
+    for (i = 0; i < g->max_src; i++) {
         sx_grx_t *s = &g->src[i];
         if (!s->used) {
             continue;
         }
         if (now_ms - s->last_recv_ms > SX_GROUP_SRC_TIMEOUT_MS) {
-            int r;
-            for (r = 0; r < SX_GROUP_REORDER; r++) {
-                free(s->ring[r].data);
+            uint32_t r;
+            for (r = 0; r < g->reorder; r++) {
+                sx_pool_free(&g->ep->pool, s->ring[r].data);
                 s->ring[r].data = NULL;
             }
-            memset(s, 0, sizeof(*s));
+            memset(s->ring, 0, g->reorder * sizeof(sx_msg_t));
+            s->used = 0;
+            s->rcv_nxt = 0;
+            s->peer_max = 0;
+            s->count = 0;
             continue;
         }
         /* 只要期望序号落后于对端高水位（含尾部丢包），就请求重发。 */

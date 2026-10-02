@@ -41,6 +41,14 @@ void sx_kcp_send_raw(sx_kcp_t *k, uint8_t cmd, uint32_t seq, uint32_t una,
     if (payload_len > k->ep->cfg.max_payload) {
         return;
     }
+    /* MTU 联合预算：SX 头 + ack_list + 净荷 必须 <= UDP 净荷上限，
+     * 超出则裁剪 ack_list（累积确认 una 仍有效）。 */
+    {
+        size_t budget = SX_UDP_PAYLOAD_MAX - SX_HDR_SIZE - payload_len;
+        if ((size_t)ack_count * 4u > budget) {
+            ack_count = (uint32_t)(budget / 4u);
+        }
+    }
 
     memset(&h, 0, sizeof(h));
     h.cmd = cmd;
@@ -165,11 +173,11 @@ void sx_kcp_reset(sx_kcp_t *k) {
         return;
     }
     for (i = 0; i < k->send_cap; i++) {
-        free(k->snd_buf[i].data);
+        sx_pool_free(&k->ep->pool, k->snd_buf[i].data);
         k->snd_buf[i].data = NULL;
     }
     for (i = 0; i < k->recv_cap; i++) {
-        free(k->rcv_buf[i].data);
+        sx_pool_free(&k->ep->pool, k->rcv_buf[i].data);
         k->rcv_buf[i].data = NULL;
     }
     memset(k->snd_buf, 0, k->send_cap * sizeof(sx_msg_t));
@@ -225,12 +233,12 @@ int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
     slot = &k->snd_buf[seq & (k->send_cap - 1u)];
     if (slot->data != NULL) {
         /* 环回绕前的残留（理论上不应发生，防御性释放）。 */
-        free(slot->data);
+        sx_pool_free(&k->ep->pool, slot->data);
         slot->data = NULL;
     }
     copy = NULL;
     if (len > 0) {
-        copy = (uint8_t *)malloc(len);
+        copy = (uint8_t *)sx_pool_alloc(&k->ep->pool, len);
         if (copy == NULL) {
             /* 复位槽位，避免留下 data=NULL 但 seq/flags 陈旧的半初始化状态。 */
             slot->seq = 0;
@@ -333,7 +341,7 @@ static void kcp_advance_una(sx_kcp_t *k) {
         if (slot->flags != SX_MSG_ACKED) {
             break;
         }
-        free(slot->data);
+        sx_pool_free(&k->ep->pool, slot->data);
         slot->data = NULL;
         slot->flags = SX_MSG_FREE;
         slot->seq = 0;
@@ -417,7 +425,7 @@ static void kcp_drain(sx_kcp_t *k) {
             break;
         }
         kcp_deliver(k, slot);
-        free(slot->data);
+        sx_pool_free(&k->ep->pool, slot->data);
         slot->data = NULL;
         slot->flags = SX_MSG_FREE;
         slot->seq = 0;
@@ -454,11 +462,11 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
             return;
         }
         if (slot->data != NULL) {
-            free(slot->data);
+            sx_pool_free(&k->ep->pool, slot->data);
             slot->data = NULL;
         }
         if (h->payload_len > 0) {
-            slot->data = (uint8_t *)malloc(h->payload_len);
+            slot->data = (uint8_t *)sx_pool_alloc(&k->ep->pool, h->payload_len);
             if (slot->data == NULL) {
                 return;
             }

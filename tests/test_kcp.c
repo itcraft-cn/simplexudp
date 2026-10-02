@@ -198,6 +198,7 @@ int main(int argc, char **argv) {
                 break;
             }
         }
+        sx_ep_flush(&epB); /* 直接驱动 kcp 时，手动 flush 回调队列 */
         usleep(2000);
     }
 

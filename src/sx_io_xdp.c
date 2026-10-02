@@ -315,6 +315,14 @@ static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
         xdp_complete_tx(p);
         xdp_fill_fq(p);
 
+        /* 可观测性：UMEM 帧耗尽意味着无法继续给 FILL 环补充缓冲，
+         * 内核对 xsk 的接收可能开始静默丢包（不进 stats.dropped）。 */
+        if (p->frame_free == 0 && io->ep != NULL) {
+            io->ep->stats.xdp_rx_backlog++;
+            sx_log(io->ep, SX_LOG_DEBUG,
+                   "xdp: umem frames exhausted (possible rx drops)");
+        }
+
         n = xsk_ring_cons__peek(&p->rx, SX_XDP_RX_BATCH, &idx);
         if (n == 0) {
             return 0;

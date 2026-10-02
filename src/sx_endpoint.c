@@ -39,6 +39,11 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->send_window = 256;
     cfg->recv_window = 1024;
     cfg->group_history = 1024;
+    cfg->group_reorder = 256;
+    cfg->group_max_src = 32;
+    cfg->max_peers = 1024;
+    cfg->rx_batch = 4096;
+    cfg->pool_blocks = 0;
     cfg->min_rto_ms = 100;
     cfg->max_rto_ms = 5000;
     cfg->keepalive_ms = 10000;
@@ -80,47 +85,78 @@ void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link) {
     }
 }
 
-void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
-                   uint16_t src_port, const void *data, size_t len) {
-    (void)src_ip;
-    (void)src_port;
-    if (ep->cfg.on_recv != NULL) {
-        ep->cfg.on_recv(ep, link, data, len, ep->cfg.user);
+/* 把一条消息复制入队（数据来自内存池）。head/tail/count 由调用方指定，
+ * 使拉取队列与回调队列共用同一套入队逻辑。 */
+static void ep_enqueue(sx_endpoint_t *ep, sx_rx_item_t **head,
+                       sx_rx_item_t **tail, size_t *count, sx_link_t *link,
+                       uint32_t src_ip, uint16_t src_port, const void *data,
+                       size_t len) {
+    sx_rx_item_t *item = (sx_rx_item_t *)calloc(1, sizeof(*item));
+    if (item == NULL) {
         return;
     }
-    /* 拉取模式：入队。 */
-    {
-        sx_rx_item_t *item = (sx_rx_item_t *)calloc(1, sizeof(*item));
-        if (item == NULL) {
-            return;
-        }
-        item->data = (uint8_t *)malloc(len > 0 ? len : 1);
+    if (len > 0) {
+        item->data = (uint8_t *)sx_pool_alloc(&ep->pool, len);
         if (item->data == NULL) {
             free(item);
             return;
         }
-        if (len > 0) {
-            memcpy(item->data, data, len);
-        }
-        item->len = len;
-        item->link = link;
-        item->addr.ip = src_ip;
-        item->addr.port = src_port;
-        item->addr.scope = link != NULL ? link->scope : SX_SCOPE_UNICAST;
-        if (link != NULL) {
-            item->addr.ip = link->addr.ip;
-            item->addr.port = link->addr.port;
-            memcpy(item->addr.mac, link->addr.mac, 6);
-        }
-        item->next = NULL;
-        if (ep->rx_tail != NULL) {
-            ep->rx_tail->next = item;
-        } else {
-            ep->rx_head = item;
-        }
-        ep->rx_tail = item;
-        ep->rx_count++;
+        memcpy(item->data, data, len);
     }
+    item->len = len;
+    item->link = link;
+    item->addr.ip = link != NULL ? link->addr.ip : src_ip;
+    item->addr.port = link != NULL ? link->addr.port : src_port;
+    item->addr.scope = link != NULL ? link->scope : SX_SCOPE_UNICAST;
+    if (link != NULL) {
+        memcpy(item->addr.mac, link->addr.mac, 6);
+    }
+    item->next = NULL;
+    if (*tail != NULL) {
+        (*tail)->next = item;
+    } else {
+        *head = item;
+    }
+    *tail = item;
+    (*count)++;
+}
+
+/* 取出回调队列，解锁后逐条调用 on_recv（数据来自内存池，回调后归还）。 */
+void sx_ep_flush(sx_endpoint_t *ep) {
+    sx_rx_item_t *batch;
+    if (ep == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&ep->lock);
+    batch = ep->cb_head;
+    ep->cb_head = NULL;
+    ep->cb_tail = NULL;
+    ep->cb_count = 0;
+    pthread_mutex_unlock(&ep->lock);
+
+    while (batch != NULL) {
+        sx_rx_item_t *next = batch->next;
+        if (ep->cfg.on_recv != NULL) {
+            ep->cfg.on_recv(ep, batch->link, batch->data, batch->len,
+                            ep->cfg.user);
+        }
+        sx_pool_free(&ep->pool, batch->data);
+        free(batch);
+        batch = next;
+    }
+}
+
+void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
+                   uint16_t src_port, const void *data, size_t len) {
+    /* 回调模式：先入回调队列，由 sx_update 在解锁后统一调用，避免回调持锁。 */
+    if (ep->cfg.on_recv != NULL) {
+        ep_enqueue(ep, &ep->cb_head, &ep->cb_tail, &ep->cb_count, link, src_ip,
+                   src_port, data, len);
+        return;
+    }
+    /* 拉取模式：入拉取队列。 */
+    ep_enqueue(ep, &ep->rx_head, &ep->rx_tail, &ep->rx_count, link, src_ip,
+               src_port, data, len);
 }
 
 static void link_destroy(sx_link_t *link) {
@@ -151,9 +187,10 @@ static sx_link_t *link_new(sx_endpoint_t *ep, const sx_addr_t *addr) {
 }
 
 static int ep_add_link(sx_endpoint_t *ep, sx_link_t *link) {
-    if (ep->nlinks >= SX_MAX_PEERS) {
+    uint32_t max_peers = ep->cfg.max_peers ? ep->cfg.max_peers : SX_MAX_PEERS;
+    if (ep->nlinks >= max_peers) {
         sx_log(ep, SX_LOG_WARN,
-               "peer limit %d reached, refuse %u.%u.%u.%u:%u", SX_MAX_PEERS,
+               "peer limit %u reached, refuse %u.%u.%u.%u:%u", max_peers,
                (link->addr.ip >> 24) & 0xff, (link->addr.ip >> 16) & 0xff,
                (link->addr.ip >> 8) & 0xff, link->addr.ip & 0xff,
                link->addr.port);
@@ -275,8 +312,9 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
 static int ep_drain_rx(sx_endpoint_t *ep) {
     uint8_t buf[SX_HDR_SIZE + SX_ACK_LIST_MAX * 4 + SX_MAX_PAYLOAD_LIMIT];
     int count = 0;
-    int guard;
-    for (guard = 0; guard < SX_RX_BATCH_MAX; guard++) {
+    uint32_t batch = ep->cfg.rx_batch ? ep->cfg.rx_batch : SX_RX_BATCH_MAX;
+    uint32_t guard;
+    for (guard = 0; guard < batch; guard++) {
         uint32_t sip = 0;
         uint16_t sport = 0;
         size_t len = 0;
@@ -354,6 +392,19 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
     } else {
         ep->cfg.ifname = NULL;
     }
+
+    /* 热路径内存池：默认按发送/接收窗口推导块数。初始化失败不致命
+     * （sx_pool_alloc 会回退 malloc）。 */
+    {
+        uint32_t bsz = (uint32_t)(ep->cfg.max_payload ? ep->cfg.max_payload : 1);
+        uint32_t nblocks = ep->cfg.pool_blocks;
+        if (nblocks == 0) {
+            uint32_t sw = ep->cfg.send_window ? ep->cfg.send_window : 256;
+            uint32_t rw = ep->cfg.recv_window ? ep->cfg.recv_window : 1024;
+            nblocks = sw * 2 + rw + 128;
+        }
+        (void)sx_pool_init(&ep->pool, bsz, nblocks);
+    }
     return ep;
 }
 
@@ -390,9 +441,10 @@ static sx_io_t *create_backend(sx_endpoint_t *ep, int *chosen) {
 static void *ep_thread_main(void *arg) {
     sx_endpoint_t *ep = (sx_endpoint_t *)arg;
     while (!ep->stop_flag) {
-        /* sx_update 内部加锁，可与其他线程的 sx_send/update 并发。 */
+        /* 先用 poll 等待可读（有数据立即唤醒，否则最多 2ms），再驱动 update，
+         * 避免纯轮询带来的固定延迟。sx_update 内部加锁，可与其他线程并发。 */
+        (void)sx_wait(ep, 2);
         (void)sx_update(ep, 0);
-        usleep(2000);
     }
     return NULL;
 }
@@ -455,17 +507,28 @@ int sx_stop(sx_endpoint_t *ep) {
     ep->mc_links = NULL;
     ep->nmc = 0;
     ep->bcast_link = NULL;
-    /* 清空拉取队列。 */
+    /* 清空拉取队列与回调队列（缓冲经内存池归还）。 */
     {
         sx_rx_item_t *it = ep->rx_head;
         while (it != NULL) {
             sx_rx_item_t *n = it->next;
-            free(it->data);
+            sx_pool_free(&ep->pool, it->data);
             free(it);
             it = n;
         }
         ep->rx_head = ep->rx_tail = NULL;
         ep->rx_count = 0;
+    }
+    {
+        sx_rx_item_t *it = ep->cb_head;
+        while (it != NULL) {
+            sx_rx_item_t *n = it->next;
+            sx_pool_free(&ep->pool, it->data);
+            free(it);
+            it = n;
+        }
+        ep->cb_head = ep->cb_tail = NULL;
+        ep->cb_count = 0;
     }
     ep->running = 0;
     return SX_OK;
@@ -476,6 +539,7 @@ void sx_destroy(sx_endpoint_t *ep) {
         return;
     }
     (void)sx_stop(ep);
+    sx_pool_destroy(&ep->pool);
     free(ep->ifname_owned);
     pthread_mutex_destroy(&ep->log_lock);
     pthread_mutex_destroy(&ep->lock);
@@ -522,7 +586,9 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
         }
     } else {
         link->group = sx_group_create(ep, link, ep->cfg.conv,
-                                      ep->cfg.group_history, SX_GROUP_REORDER);
+                                      ep->cfg.group_history,
+                                      ep->cfg.group_reorder,
+                                      ep->cfg.group_max_src);
         if (link->group == NULL) {
             link_destroy(link);
             link = NULL;
@@ -681,7 +747,7 @@ ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out,
     {
         /* 返回完整消息长度：若大于 cap 说明本次被截断，调用方可据此察觉。 */
         ssize_t full = (ssize_t)item->len;
-        free(item->data);
+        sx_pool_free(&ep->pool, item->data);
         free(item);
         return full;
     }
@@ -727,6 +793,9 @@ int sx_update(sx_endpoint_t *ep, uint64_t now_ms) {
     ep_link_timeouts(ep, now);
 
     pthread_mutex_unlock(&ep->lock);
+
+    /* 解锁后统一投递回调，避免用户回调在端点锁内执行。 */
+    sx_ep_flush(ep);
     return processed;
 }
 
