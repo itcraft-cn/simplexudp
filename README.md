@@ -35,18 +35,79 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 ## 构建
 
+### 依赖
+
+- C 编译器：`gcc` 或 `clang`（C99）。
+- 构建工具：`make`（或 CMake ≥ 3.16）。
+- **AF_XDP 后端**额外需要：`libbpf`、`libxdp` 开发包，`clang`（支持 `-target bpf`，用于编译 XDP 程序），
+  `xxd`（把 BPF 目标内嵌为字节数组），`pkg-config`（可选，用于探测 libbpf/libxdp）。
+- 运行 AF_XDP 需要 root（或 `CAP_BPF` + `CAP_NET_ADMIN`）；**内核 UDP 后端无需特权**。
+
 ```sh
-make            # 构建 build/libsimplexudp.a 与 .so（内含 XDP BPF 目标）
-make examples   # 构建示例
-make tests      # 构建测试
-make check         # 运行单元/回环测试（无需 root，UDP 后端）
-make check-xdp     # 需要 root：创建 veth 跑 AF_XDP 端到端测试
-make check-latency # 需要 root：AF_XDP 时延测试 + bpftool 佐证流量经过 XDP
+# Debian / Ubuntu
+sudo apt-get install -y build-essential clang llvm libbpf-dev libxdp-dev pkg-config xxd
+
+# RHEL / CentOS / Fedora
+sudo dnf install -y gcc clang llvm libbpf-devel libxdp-devel pkgconf-pkg-config vim-common
 ```
 
-备选：`cmake -S . -B build-cmake && cmake --build build-cmake -j`。
+### 常用目标
 
-依赖：`libbpf`、`libxdp`、`clang`（编译 BPF 目标；`xxd` 生成内嵌数组）。
+```sh
+make                 # 构建 build/libsimplexudp.a 与 .so（默认含 XDP BPF 目标）
+make bpf             # 仅编译 XDP BPF 目标
+make examples        # 示例：build/sx_p2p、build/sx_group
+make tests           # 单元/回环测试：build/test_{frame,proto,kcp,loopback,recv}
+make tests-xdp       # AF_XDP 端到端测试：build/test_xdp
+make tests-latency   # 时延测试：build/test_latency
+make tests-throughput# 吞吐/长稳测试：build/test_throughput
+make group-tools     # 组播/广播工具：build/test_gsend、build/test_grecv
+make relay-tool      # 三跳接力：build/test_relay
+
+make check           # 运行单元/回环测试（无需 root，UDP 后端）
+make check-xdp       # 需要 root：创建 veth 跑 AF_XDP 端到端测试
+make check-latency   # 需要 root：AF_XDP 时延测试 + bpftool 佐证流量经过 XDP
+make check-latency-2p# 需要 root：双进程 AF_XDP 时延测试
+
+make install         # 安装头文件与库（默认 PREFIX=/usr/local）
+make uninstall
+make clean
+```
+
+### 构建选项
+
+| 变量 | 作用 |
+| --- | --- |
+| `SX_NO_XDP=1` | 仅内核 UDP 后端：不依赖 libbpf/libxdp/clang，用于无 XDP 环境或分发 |
+| `SX_LOSSY=1` | 编译进丢包/乱序注入（运行期环境变量 `SX_LOSSY_DROP_PPM`/`SX_LOSSY_DUP_PPM`/`SX_LOSSY_REORDER_PPM` 开启），用于无 root 的可靠性测试 |
+| `DEBUG=1` | `-O0 -g -DDEBUG` |
+| `CC=clang` | 指定编译器 |
+| `PREFIX` / `DESTDIR` | `install` 的安装前缀与打包根 |
+
+```sh
+# 无 XDP 环境（例如仅需 UDP 后端/容器/CI）
+make SX_NO_XDP=1
+make SX_NO_XDP=1 group-tools relay-tool
+
+# 带丢包注入的调试构建
+make SX_LOSSY=1 DEBUG=1
+
+# 安装 / 打包
+sudo make install PREFIX=/usr/local
+make install DESTDIR=/tmp/pkg PREFIX=/usr
+```
+
+### 架构
+
+Makefile 自动探测架构（`uname -m`，x86_64 / aarch64）：用 `$(CC) -print-multiarch`
+定位 multiarch 头文件，XDP 程序用 `clang -target bpf` 编译；无需手工指定目标。
+
+### CMake 备选
+
+```sh
+cmake -S . -B build-cmake && cmake --build build-cmake -j
+cd build-cmake && ctest        # 运行单元/回环测试
+```
 
 > 日志：库内**不使用 stdout/stderr**，统一通过 `sx_config.on_log` 回调；测试/示例写入日志文件。
 
