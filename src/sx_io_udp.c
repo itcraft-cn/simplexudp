@@ -171,17 +171,22 @@ static int udp_poll(sx_io_t *io, int timeout_ms) {
     return r;
 }
 
-static int udp_join_multicast(sx_io_t *io, uint32_t group_ip, uint32_t local_ip) {
+static int udp_join_multicast(sx_io_t *io, uint32_t group_ip,
+                              uint32_t iface_ip) {
     sx_udp_priv_t *p = (sx_udp_priv_t *)io->priv;
     struct ip_mreq mreq;
+    struct in_addr ifa;
 
     memset(&mreq, 0, sizeof(mreq));
     mreq.imr_multiaddr.s_addr = htonl(group_ip);
-    mreq.imr_interface.s_addr = local_ip ? htonl(local_ip) : htonl(INADDR_ANY);
+    mreq.imr_interface.s_addr = iface_ip ? htonl(iface_ip) : htonl(INADDR_ANY);
     if (setsockopt(p->sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
                    sizeof(mreq)) < 0) {
         return SX_ERR_IO;
     }
+    /* 指定组播发送/接收接口，避免走默认路由（多网卡场景必需）。 */
+    ifa.s_addr = iface_ip ? htonl(iface_ip) : htonl(INADDR_ANY);
+    (void)setsockopt(p->sock, IPPROTO_IP, IP_MULTICAST_IF, &ifa, sizeof(ifa));
     return SX_OK;
 }
 

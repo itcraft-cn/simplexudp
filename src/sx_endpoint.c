@@ -544,7 +544,7 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
         }
         if (scope == SX_SCOPE_MULTICAST && ep->io != NULL &&
             ep->io->join_multicast != NULL) {
-            (void)ep->io->join_multicast(ep->io, ip, ep->cfg.local_ip);
+            (void)ep->io->join_multicast(ep->io, ip, ep->cfg.multicast_if);
         }
     }
     sx_ep_emit(ep, SX_EVENT_PEER_ADDED, link);

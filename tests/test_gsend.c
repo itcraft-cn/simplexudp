@@ -1,7 +1,8 @@
 /*
  * test_gsend.c - 组播/广播发送端（跨主机测试用）
  *
- * 用法：test_gsend <mcast|bcast> <dst_ip> <port> <count> [interval_us]
+ * 用法：test_gsend <mcast|bcast> <mcast_if_ip|0> <dst_ip> <port> <count> [interval_us]
+ *   mcast_if_ip 为组播出口接口地址（多网卡必需），0 表示默认。
  * 行为：以 UDP 后端建立组播/广播链路，发送 count 个带序号的小报文。
  * 日志写入文件（默认 test_gsend.log，可用 SX_LOG 覆盖），不使用标准输出。
  */
@@ -41,6 +42,7 @@ int main(int argc, char **argv) {
     sx_link_t *link;
     uint32_t dst_ip;
     uint16_t port;
+    uint32_t mcast_if;
     unsigned long count;
     unsigned long interval_us = 0;
     unsigned long i;
@@ -49,23 +51,25 @@ int main(int argc, char **argv) {
     if (g_log == NULL) {
         return 2;
     }
-    if (argc < 5) {
-        fprintf(g_log, "usage: %s <mcast|bcast> <dst_ip> <port> <count> "
-                       "[interval_us]\n", argv[0]);
+    if (argc < 6) {
+        fprintf(g_log, "usage: %s <mcast|bcast> <mcast_if_ip|0> <dst_ip> "
+                       "<port> <count> [interval_us]\n", argv[0]);
         fclose(g_log);
         return 2;
     }
     mode = argv[1];
-    dst_ip = parse_ip(argv[2]);
-    port = (uint16_t)strtoul(argv[3], NULL, 10);
-    count = strtoul(argv[4], NULL, 10);
-    if (argc > 5) {
-        interval_us = strtoul(argv[5], NULL, 10);
+    mcast_if = parse_ip(argv[2]);
+    dst_ip = parse_ip(argv[3]);
+    port = (uint16_t)strtoul(argv[4], NULL, 10);
+    count = strtoul(argv[5], NULL, 10);
+    if (argc > 6) {
+        interval_us = strtoul(argv[6], NULL, 10);
     }
 
     sx_config_init(&cfg);
     cfg.backend = SX_BACKEND_UDP;
     cfg.local_port = 0;
+    cfg.multicast_if = mcast_if;
     cfg.conv = CONV;
     cfg.on_log = log_fn;
     cfg.log_level = SX_LOG_WARN;
@@ -86,8 +90,8 @@ int main(int argc, char **argv) {
         fclose(g_log);
         return 1;
     }
-    fprintf(g_log, "send mode=%s dst=%s:%u count=%lu\n", mode, argv[2], port,
-            count);
+    fprintf(g_log, "send mode=%s if=%s dst=%s:%u count=%lu\n", mode, argv[2],
+            argv[3], port, count);
 
     for (i = 0; i < count; i++) {
         unsigned char buf[32];

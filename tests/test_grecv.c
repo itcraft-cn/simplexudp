@@ -1,7 +1,8 @@
 /*
  * test_grecv.c - 组播/广播接收端（跨主机测试用）
  *
- * 用法：test_grecv <mcast|bcast> <group_ip> <port> <count> <timeout_ms>
+ * 用法：test_grecv <mcast|bcast> <mcast_if_ip|0> <group_ip> <port> <count> <timeout_ms>
+ *   mcast_if_ip 为组播入组/出口接口地址（多网卡必需），0 表示默认。
  * 行为：绑定端口并加入组播（或加入广播链路的组引擎），按序接收 count 个报文。
  *       收满退出 0，超时未满退出 1。
  * 日志写入文件（默认 test_grecv.log，可用 SX_LOG 覆盖），不使用标准输出。
@@ -71,6 +72,7 @@ int main(int argc, char **argv) {
     sx_link_t *link;
     ctx_t ctx;
     uint32_t grp_ip;
+    uint32_t mcast_if;
     uint16_t port;
     unsigned long expect;
     unsigned long timeout_ms;
@@ -81,21 +83,23 @@ int main(int argc, char **argv) {
     if (g_log == NULL) {
         return 2;
     }
-    if (argc < 6) {
-        fprintf(g_log, "usage: %s <mcast|bcast> <group_ip> <port> <count> "
-                       "<timeout_ms>\n", argv[0]);
+    if (argc < 7) {
+        fprintf(g_log, "usage: %s <mcast|bcast> <mcast_if_ip|0> <group_ip> "
+                       "<port> <count> <timeout_ms>\n", argv[0]);
         fclose(g_log);
         return 2;
     }
     mode = argv[1];
-    grp_ip = parse_ip(argv[2]);
-    port = (uint16_t)strtoul(argv[3], NULL, 10);
-    expect = strtoul(argv[4], NULL, 10);
-    timeout_ms = strtoul(argv[5], NULL, 10);
+    mcast_if = parse_ip(argv[2]);
+    grp_ip = parse_ip(argv[3]);
+    port = (uint16_t)strtoul(argv[4], NULL, 10);
+    expect = strtoul(argv[5], NULL, 10);
+    timeout_ms = strtoul(argv[6], NULL, 10);
 
     sx_config_init(&cfg);
     cfg.backend = SX_BACKEND_UDP;
     cfg.local_ip = 0;
+    cfg.multicast_if = mcast_if;
     cfg.local_port = port;
     cfg.conv = CONV;
     cfg.on_recv = on_recv;
@@ -119,8 +123,8 @@ int main(int argc, char **argv) {
         fclose(g_log);
         return 1;
     }
-    fprintf(g_log, "recv mode=%s group=%s:%u expect=%lu\n", mode, argv[2], port,
-            expect);
+    fprintf(g_log, "recv mode=%s if=%s group=%s:%u expect=%lu\n", mode, argv[2],
+            argv[3], port, expect);
 
     t0 = now_ms();
     while (ctx.got < expect && now_ms() - t0 < timeout_ms) {

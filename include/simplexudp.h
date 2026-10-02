@@ -180,6 +180,7 @@ typedef struct sx_config {
 
     /* ---- 本地标识 ---- */
     uint32_t local_ip;     /* 本机 IP（主机序）；0 表示不指定 */
+    uint32_t multicast_if; /* 组播出口/入组接口 IPv4（主机序）；0=默认接口 */
     uint16_t local_port;   /* 本地 UDP 端口（主机序） */
     uint32_t conv;         /* 会话/组标识，默认 SX_DEFAULT_CONV */
 
