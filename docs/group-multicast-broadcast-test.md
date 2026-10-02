@@ -64,3 +64,36 @@ br1/br2/br3: got=0
 - `include/simplexudp.h`：新增 `sx_config.multicast_if`。
 - `tests/test_gsend.c` / `test_grecv.c`：组播/广播发送与接收端（`group-tools` 目标）。
 - `src/sx_endpoint.c`：新增 DEBUG 级丢弃/路由日志（便于排查）。
+
+---
+
+## 6. 物理机验证（eraytlnx45 / eraytlnx46）
+
+在物理机上复测（UDP 后端，`make SX_NO_XDP=1 group-tools`）：
+
+- 46 测试网卡 ens3f1 = 192.168.111.46；45 测试网卡 p3p2 = 192.168.111.45（真实交换机二层）。
+- 发送端 45，接收端 46 起三份。
+
+### 组播（239.2.2.2:48100，1000 条）
+
+```
+mr1: got=1000 expect=1000 ooo=9
+mr2: got=1003 expect=1000 ooo=10
+mr3: got=1007 expect=1000 ooo=10
+```
+
+### 广播（192.168.111.255:48101，1000 条）
+
+```
+br1: got=995  expect=1000 ooo=8
+br2: got=993  expect=1000 ooo=7
+br3: got=1000 expect=1000 ooo=7
+```
+
+### 结论（物理机）
+
+- **组播与广播均可用**：组播 mr1 精确 1000，mr2/mr3 多收 3/7；广播 993~1000（约 0.5% best-effort 丢失）。
+- 相比 VirtualBox（广播为 0），**真实二层交换机下组播/广播正常**，证明前述问题是 VBox 环境而非库。
+- 仍观察到组播/广播的**少量重复投递**（`got>expect`）与**少量乱序**（引擎按序投递，ooo 计数），
+  属尽力可靠语义范围内的已知现象，建议后续优化去重。
+- 需要严格可靠的点对多，仍建议改用**单播扇出**（每接收者 `sx_add_unicast`）。
