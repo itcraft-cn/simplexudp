@@ -79,6 +79,8 @@ typedef struct sx_xdp_priv {
     int ifindex;
     uint8_t local_mac[6];
     uint32_t local_ip;
+    uint32_t netmask;
+    uint32_t gateway_ip;
     uint16_t local_port;
 
     void *umem_area;
@@ -107,8 +109,9 @@ typedef struct sx_xdp_priv {
     uint32_t outstanding_tx;
 } sx_xdp_priv_t;
 
-/* 解析接口 MAC 与 IPv4 地址。 */
-static int xdp_query_iface(const char *ifname, uint8_t mac[6], uint32_t *ip) {
+/* 解析接口 MAC、IPv4 地址与子网掩码。 */
+static int xdp_query_iface(const char *ifname, uint8_t mac[6], uint32_t *ip,
+                           uint32_t *netmask) {
     int s;
     struct ifreq ifr;
 
@@ -127,6 +130,14 @@ static int xdp_query_iface(const char *ifname, uint8_t mac[6], uint32_t *ip) {
         if (ip != NULL) {
             struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
             *ip = ntohl(sin->sin_addr.s_addr);
+        }
+    }
+    if (netmask != NULL) {
+        memset(&ifr, 0, sizeof(ifr));
+        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+        if (ioctl(s, SIOCGIFNETMASK, &ifr) == 0) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_netmask;
+            *netmask = ntohl(sin->sin_addr.s_addr);
         }
     }
     close(s);
@@ -240,6 +251,8 @@ static void xdp_mcast_mac(uint32_t ip, uint8_t mac[6]) {
 }
 
 static int xdp_resolve_mac(sx_xdp_priv_t *p, uint32_t dst_ip, uint8_t mac[6]) {
+    uint32_t arp_ip = dst_ip;
+
     if (dst_ip == 0xffffffffu) {
         memset(mac, 0xff, 6);
         return SX_OK;
@@ -248,9 +261,27 @@ static int xdp_resolve_mac(sx_xdp_priv_t *p, uint32_t dst_ip, uint8_t mac[6]) {
         xdp_mcast_mac(dst_ip, mac);
         return SX_OK;
     }
-    return sx_arp_resolve(p->arp, dst_ip, mac);
+    /* 跨网段：目的 IP 不在本接口子网时，二层目的地址应为网关 MAC。
+     * 网关映射同样通过静态 ARP 注册（sx_add_static_arp(gateway_ip, mac)）。 */
+    if (p->gateway_ip != 0 && p->netmask != 0 &&
+        (dst_ip & p->netmask) != (p->local_ip & p->netmask)) {
+        arp_ip = p->gateway_ip;
+    }
+    return sx_arp_resolve(p->arp, arp_ip, mac);
 }
 
+/* 注册静态 ARP。仅影响 XDP 发送路径，不改变已建立链路的地址。 */
+static int xdp_set_static_arp(sx_io_t *io, uint32_t ip, const uint8_t mac[6]) {
+    sx_xdp_priv_t *p;
+    if (io == NULL || io->priv == NULL || mac == NULL) {
+        return SX_ERR_INVALID;
+    }
+    p = (sx_xdp_priv_t *)io->priv;
+    if (p->arp == NULL) {
+        return SX_ERR_STATE;
+    }
+    return sx_arp_set(p->arp, ip, mac);
+}
 static int xdp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
                       const void *buf, size_t len) {
     sx_xdp_priv_t *p;
@@ -480,6 +511,7 @@ static int xdp_attach_program(sx_xdp_priv_t *p, sx_endpoint_t *ep,
     unsigned int modes[2];
     int nmodes = 0;
     int i;
+    int last_errno = 0;
 
     if (ep->cfg.xdp_mode == SX_XDP_MODE_NATIVE) {
         modes[nmodes++] = XDP_FLAGS_DRV_MODE;
@@ -499,8 +531,20 @@ static int xdp_attach_program(sx_xdp_priv_t *p, sx_endpoint_t *ep,
                                      : SX_XDP_MODE_NATIVE;
             return SX_OK;
         }
+        last_errno = errno;
     }
-    sx_log(ep, SX_LOG_ERROR, "bpf_xdp_attach failed on %s", p->ifname);
+    if (last_errno == EEXIST || last_errno == EBUSY) {
+        /* 同一网卡同一时刻只允许一个 XDP 程序（本库不替换已有程序）。
+         * 明确提示，避免调用方误以为仍在 AF_XDP 路径上。 */
+        sx_log(ep, SX_LOG_ERROR,
+               "xdp attach refused on %s: another XDP program is attached "
+               "(one XDP endpoint per interface); use another interface or "
+               "SX_BACKEND_UDP",
+               p->ifname);
+    } else {
+        sx_log(ep, SX_LOG_ERROR, "bpf_xdp_attach failed on %s errno=%d",
+               p->ifname, last_errno);
+    }
     return SX_ERR_BACKEND;
 }
 
@@ -630,10 +674,14 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
         p->frame_size = 2048;
     }
 
-    (void)xdp_query_iface(p->ifname, p->local_mac, &p->local_ip);
+    (void)xdp_query_iface(p->ifname, p->local_mac, &p->local_ip, &p->netmask);
     if (ep->cfg.local_ip != 0) {
         p->local_ip = ep->cfg.local_ip;
     }
+    if (ep->cfg.netmask != 0) {
+        p->netmask = ep->cfg.netmask;
+    }
+    p->gateway_ip = ep->cfg.gateway_ip;
     p->local_port = ep->cfg.local_port;
 
     p->frame_addr = (uint64_t *)calloc(p->num_frames, sizeof(uint64_t));
@@ -689,6 +737,7 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     io->poll = xdp_poll;
     io->join_multicast = xdp_join_multicast;
     io->update = xdp_update;
+    io->set_static_arp = xdp_set_static_arp;
     io->close = xdp_close;
 
     /* 将 xsk 注册到 xsks_map 对应队列，并回填实际端口。 */

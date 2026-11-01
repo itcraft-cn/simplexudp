@@ -85,6 +85,12 @@ typedef enum sx_xdp_bind {
     SX_XDP_BIND_ZEROCOPY  /* 强制 zero-copy */
 } sx_xdp_bind_t;
 
+/* 拥塞控制模式。 */
+typedef enum sx_cc_mode {
+    SX_CC_ON = 0,  /* 默认：慢启动 + 拥塞避免 + 超时降窗 */
+    SX_CC_OFF      /* 专线模式：窗口固定为 send_window，仅保留 RTO 退避/重传 */
+} sx_cc_mode_t;
+
 /* 通讯范围语义。 */
 typedef enum sx_scope {
     SX_SCOPE_UNICAST = 0, /* 点对点，严格可靠有序 */
@@ -117,7 +123,8 @@ typedef enum sx_event {
 typedef struct sx_addr {
     uint32_t ip;    /* IPv4，主机字节序；0 表示自动/由后端推导 */
     uint16_t port;  /* 端口，主机字节序 */
-    uint8_t mac[6]; /* 目的 MAC；XDP 后端可留 0，由 ARP 解析 */
+    uint8_t mac[6]; /* 目的 MAC；XDP 后端可通过 sx_add_static_arp 固化；
+                     * 仅调用 sx_add_unicast 时该字段不参与发送路径。 */
     sx_scope_t scope;
 } sx_addr_t;
 
@@ -143,7 +150,9 @@ typedef struct sx_stats {
     uint32_t cwnd;
     uint32_t rtt_ms;        /* 平滑 RTT */
     uint32_t rto_ms;        /* 当前 RTO */
+    uint32_t cc_mode;       /* 实际拥塞控制模式：sx_cc_mode_t */
     uint32_t backend;       /* 实际后端：sx_backend_t */
+    uint32_t backend_fallback; /* 1 = AUTO 模式曾尝试 XDP 并回退到 UDP */
     uint32_t xdp_mode;      /* 实际 attach 模式：sx_xdp_mode_t */
     uint32_t xdp_bind;      /* 实际绑定模式：sx_xdp_bind_t */
 } sx_stats_t;
@@ -182,6 +191,8 @@ typedef struct sx_config {
     /* ---- 本地标识 ---- */
     uint32_t local_ip;     /* 本机 IP（主机序）；0 表示不指定 */
     uint32_t multicast_if; /* 组播出口/入组接口 IPv4（主机序）；0=默认接口 */
+    uint32_t gateway_ip;   /* 跨网段下一跳 IPv4（主机序）；0=不做网关转发 */
+    uint32_t netmask;      /* 本接口子网掩码（主机序）；0=由 XDP 后端自动探测 */
     uint16_t local_port;   /* 本地 UDP 端口（主机序） */
     uint32_t conv;         /* 会话/组标识，默认 SX_DEFAULT_CONV */
 
@@ -197,6 +208,7 @@ typedef struct sx_config {
     uint32_t pool_blocks;  /* 热路径内存池块数，0=按窗口自动推导 */
     uint32_t min_rto_ms;   /* 最小 RTO，默认 100 */
     uint32_t max_rto_ms;   /* 最大 RTO，默认 5000 */
+    sx_cc_mode_t cc_mode;  /* 拥塞控制模式，默认 SX_CC_ON；专线可设 SX_CC_OFF */
     uint32_t keepalive_ms; /* 空闲心跳间隔，默认 10000 */
     uint32_t timeout_ms;   /* 对端超时判定，默认 30000 */
 
@@ -254,6 +266,16 @@ int sx_wait(sx_endpoint_t *ep, int timeout_ms);
 
 /* 添加点对点链路。返回链路句柄，失败 NULL。 */
 sx_link_t *sx_add_unicast(sx_endpoint_t *ep, uint32_t ip, uint16_t port);
+
+/* 添加点对点链路并静态绑定目的 MAC（仅 AF_XDP 后端发送路径生效）。
+ * 等价于 sx_add_unicast + sx_add_static_arp；mac 为 NULL 时退化为普通单播。 */
+sx_link_t *sx_add_unicast_mac(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
+                              const uint8_t mac[6]);
+
+/* 注册静态 ARP 映射（ip -> mac）。可在 sx_start 前调用，启动时统一生效。
+ * 静态项不会被 ARP 应答覆盖，也不参与老化；UDP 后端忽略该映射。
+ * 同一 IP 重复注册时以后者为准。成功返回 0。 */
+int sx_add_static_arp(sx_endpoint_t *ep, uint32_t ip, const uint8_t mac[6]);
 
 /* 添加组播组（本地加入组、发送到 group_ip:port）。返回链路句柄，失败 NULL。 */
 sx_link_t *sx_add_multicast(sx_endpoint_t *ep, uint32_t group_ip, uint16_t port);

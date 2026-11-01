@@ -4,8 +4,9 @@
 
 - 目标平台：Linux x86_64 / aarch64，C99。
 - 单包净荷上限固定（默认 1400），严格小于 MTU，禁止分片。
-- 可靠性借鉴 **KCP**：滑动窗口、累积+选择性确认、快速重传、RTO 退避、RTT 估计、流控与拥塞控制。
+- 可靠性借鉴 **KCP**：滑动窗口、累积+选择性确认、快速重传、RTO 退避、RTT 估计、流控与拥塞控制；专线可设 `SX_CC_OFF` 关闭窗口调节。
 - 组播/广播采用 **高水位 + NACK** 的尽力可靠（best-effort reliable）+ 按序投递。
+- AF_XDP 支持静态 ARP（不可被应答覆盖）与跨网段网关配置。
 
 ## 架构
 
@@ -149,6 +150,8 @@ sx_destroy(ep);
 - `tests/test_proto.c`：协议头编解码边界。
 - `tests/test_kcp.c`：注入 **丢包 + 相邻乱序**，验证 100/100 按序到达且确有重传。
 - `tests/test_loopback.c`：UDP 后端端到端双向有序投递。
+- `tests/test_arp.c`：静态 ARP 不被伪造应答覆盖、不老化。
+- `tests/test_cc.c`：`SX_CC_OFF` 不降窗、`SX_CC_ON` 超时降窗。
 - `tests/test_xdp.c` + `scripts/veth_test.sh`：veth 上 AF_XDP native/copy 端到端。
 - `tests/test_latency.c` + `scripts/xdp_latency.sh`：停等往返时延统计（min/avg/p50/p99/max），
   并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
@@ -200,7 +203,10 @@ SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latenc
 
 - attach 模式：native 优先，失败回退 generic；bind：zero-copy 优先，失败回退 copy（自动侦测）。
 - AF_XDP 绑定单个 RX 队列；需将目标流量引导到该队列（RSS/ethtool 或单队列网卡）。
-- ARP 由本库用户态处理（XDP 程序会重定向 ARP），因此**仅在同一二层网段内可直接解析**；跨网段需配置网关/静态映射。
+- **同一网卡同一时刻只支持一个 SX XDP 端点**：不替换已有 XDP 程序，第二个端点会 attach 失败；
+  `SX_BACKEND_AUTO` 会回退 UDP 并置 `stats.backend_fallback=1`。多端点请用多网卡/多 netns。
+- ARP 由本库用户态处理（XDP 程序会重定向 ARP）。生产建议用 `sx_add_static_arp` 固定对端/网关 MAC；
+  静态项不可被 ARP 应答覆盖、不老化。跨网段设置 `gateway_ip`/`netmask` 并为网关注册静态映射。
 - generic 模式强制 copy；zero-copy 需要网卡驱动支持。
 - 组播在 XDP 后端需接口接受该组播（可能需要 `ip maddr add` 或 allmulti）。
 

@@ -70,6 +70,7 @@ int main(int argc, char **argv) {
     ctx_t cctx;
     uint16_t sport;
     uint32_t i;
+    uint8_t static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x7f};
 
     T_BEGIN(path);
     memset(&sctx, 0, sizeof(sctx));
@@ -86,6 +87,7 @@ int main(int argc, char **argv) {
 
     ccfg = scfg;
     ccfg.user = &cctx;
+    ccfg.cc_mode = SX_CC_OFF; /* 覆盖专线模式下的 API/统计路径 */
 
     srv = sx_create(&scfg);
     T_CHECK(srv != NULL, "server create");
@@ -101,10 +103,22 @@ int main(int argc, char **argv) {
     if (cli == NULL) {
         T_END();
     }
+    /* 静态 ARP 允许在 start 前登记；UDP 后端启动时忽略，但 API 必须成功。 */
+    T_CHECK(sx_add_static_arp(cli, 0x7f000001u, static_mac) == SX_OK,
+            "static arp before start");
     T_CHECK(sx_start(cli) == SX_OK, "client start");
+    {
+        sx_stats_t st;
+        T_CHECK(sx_get_stats(cli, &st) == SX_OK, "client stats");
+        T_CHECK(st.cc_mode == (uint32_t)SX_CC_OFF, "cc off in stats");
+        T_CHECK(st.backend == (uint32_t)SX_BACKEND_UDP, "udp backend chosen");
+        T_CHECK(st.backend_fallback == 0, "no fallback for forced udp");
+    }
 
-    cl = sx_add_unicast(cli, 0x7f000001u, sport);
-    T_CHECK(cl != NULL, "client add unicast");
+    cl = sx_add_unicast_mac(cli, 0x7f000001u, sport, static_mac);
+    T_CHECK(cl != NULL, "client add unicast with static mac");
+    T_CHECK(sx_add_static_arp(cli, 0x7f000001u, static_mac) == SX_OK,
+            "static arp after start");
 
     /* 客户端发送；窗口满时驱动双方（服务端回 ACK 打开窗口）。 */
     for (i = 0; i < NMSG; i++) {

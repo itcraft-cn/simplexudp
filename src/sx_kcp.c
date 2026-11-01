@@ -155,7 +155,10 @@ sx_kcp_t *sx_kcp_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
     k->send_cap = scap;
     k->recv_cap = rcap;
     k->snd_wnd = send_window > 0 ? send_window : 256u;
-    k->cwnd = SX_MIN(k->snd_wnd, 16u);
+    k->cc_enabled = (ep->cfg.cc_mode != SX_CC_OFF);
+    /* 专线模式：窗口一次性拉满，后续不随 ACK 增长、不随超时回退。
+     * 仍然受对端通告窗口（snd_wnd）约束。 */
+    k->cwnd = k->cc_enabled ? SX_MIN(k->snd_wnd, 16u) : k->snd_wnd;
     k->cwnd_cnt = 0;
     k->ssthresh = k->snd_wnd;
     k->rcv_wnd = rcap - 1;
@@ -187,7 +190,7 @@ void sx_kcp_reset(sx_kcp_t *k) {
     k->snd_count = 0;
     k->rcv_nxt = 0;
     k->rcv_count = 0;
-    k->cwnd = SX_MIN(k->snd_wnd, 16u);
+    k->cwnd = k->cc_enabled ? SX_MIN(k->snd_wnd, 16u) : k->snd_wnd;
     k->ssthresh = k->snd_wnd;
     k->ack_pending = 0;
     k->ack_count = 0;
@@ -355,6 +358,9 @@ static void kcp_advance_una(sx_kcp_t *k) {
 
 /* 拥塞窗口增长（收到新确认）。 */
 static void kcp_on_ack(sx_kcp_t *k) {
+    if (!k->cc_enabled) {
+        return; /* 专线模式：窗口固定 */
+    }
     if (k->cwnd < k->ssthresh) {
         k->cwnd++;
     } else {
@@ -631,11 +637,13 @@ static void kcp_check_retrans(sx_kcp_t *k, uint64_t now) {
         }
     }
     if (timeout) {
-        /* RTO 退避 + 超时降窗。 */
+        /* RTO 退避始终保留；拥塞窗口仅在 CC 开启时回退。 */
         k->rto_ms = SX_MIN(k->rto_ms * 2u, k->max_rto);
-        k->ssthresh = SX_MAX(k->cwnd / 2u, 2u);
-        k->cwnd = 1;
-        k->cwnd_cnt = 0;
+        if (k->cc_enabled) {
+            k->ssthresh = SX_MAX(k->cwnd / 2u, 2u);
+            k->cwnd = 1;
+            k->cwnd_cnt = 0;
+        }
     }
 }
 

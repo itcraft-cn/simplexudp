@@ -202,8 +202,10 @@ struct sx_io {
     int (*poll)(sx_io_t *io, int timeout_ms);
     /* 加入组播组（仅 UDP 后端实现；XDP 后端返回 SX_ERR_UNSUPPORTED）。 */
     int (*join_multicast)(sx_io_t *io, uint32_t group_ip, uint32_t local_ip);
-    /* 周期性维护（可选）：ARP 老化/重试等。可为 NULL。 */
+    /* 周期维护（可选）：ARP 老化/重试等。可为 NULL。 */
     void (*update)(sx_io_t *io, uint64_t now_ms);
+    /* 注册静态 ARP（仅 XDP 后端实现；UDP 后端为 NULL）。 */
+    int (*set_static_arp)(sx_io_t *io, uint32_t ip, const uint8_t mac[6]);
     void (*close)(sx_io_t *io);
 };
 
@@ -251,7 +253,8 @@ int sx_arp_input(sx_arp_t *arp, const uint8_t *frame, size_t len);
 void sx_arp_update(sx_arp_t *arp, uint64_t now_ms);
 
 /* 注册静态映射（覆盖自动解析）。 */
-void sx_arp_set(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]);
+/* 注册静态映射（覆盖同 IP 旧项）。返回 0 或负错误码。 */
+int sx_arp_set(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]);
 
 /* 本地 IP/MAC 设置（用于发送 ARP 请求）。 */
 void sx_arp_set_local(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]);
@@ -277,6 +280,7 @@ typedef struct sx_kcp {
     uint32_t cwnd;       /* 拥塞窗口（消息数） */
     uint32_t cwnd_cnt;   /* 拥塞避免计数 */
     uint32_t ssthresh;
+    int cc_enabled;      /* 0 = 专线模式，窗口不随 ACK/超时变化 */
     uint32_t send_cap;   /* 发送环容量（2 的幂） */
     sx_msg_t *snd_buf;   /* 发送环 [send_cap] */
     uint32_t snd_count;  /* 在途消息数 */
@@ -372,6 +376,12 @@ typedef struct sx_rx_item {
     struct sx_rx_item *next;
 } sx_rx_item_t;
 
+/* 静态 ARP 映射项。 */
+typedef struct sx_static_arp {
+    uint32_t ip;
+    uint8_t mac[6];
+} sx_static_arp_t;
+
 struct sx_endpoint {
     sx_config_t cfg;
     sx_io_t *io;
@@ -402,6 +412,12 @@ struct sx_endpoint {
 
     /* 热路径内存池。 */
     sx_pool_t pool;
+
+    /* 静态 ARP 映射：可在 start 前登记，start 后应用到 XDP 后端。
+     * 动态数组，受 ep->lock 保护。 */
+    sx_static_arp_t *static_arps;
+    size_t nstatic_arps;
+    size_t static_arps_cap;
 
     int running;
     int backend_chosen;

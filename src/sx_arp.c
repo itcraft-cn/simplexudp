@@ -33,6 +33,7 @@ typedef struct sx_arp_entry {
     uint8_t mac[6];
     int valid;
     int probing;
+    int is_static; /* 1 = 用户静态绑定，禁止覆盖与老化 */
     uint32_t tries;
     uint64_t ts;
 } sx_arp_entry_t;
@@ -77,11 +78,11 @@ void sx_arp_set_local(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]) {
     }
 }
 
-void sx_arp_set(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]) {
+int sx_arp_set(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]) {
     sx_arp_entry_t *e;
     int i;
     if (arp == NULL || mac == NULL) {
-        return;
+        return SX_ERR_INVALID;
     }
     e = arp_lookup(arp, ip);
     if (e == NULL) {
@@ -93,14 +94,16 @@ void sx_arp_set(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]) {
         }
     }
     if (e == NULL) {
-        return;
+        return SX_ERR_NOMEM; /* 表满：不静默丢弃静态映射 */
     }
     e->ip = ip;
     memcpy(e->mac, mac, 6);
     e->valid = 1;
     e->probing = 0;
+    e->is_static = 1; /* 静态项：ARP 应答与老化均不得改动 */
     e->tries = 0;
     e->ts = sx_now_ms();
+    return SX_OK;
 }
 
 static void arp_send_request(sx_arp_t *arp, uint32_t target_ip) {
@@ -171,6 +174,9 @@ static void arp_send_reply(sx_arp_t *arp, const uint8_t dst_mac[6], uint32_t dst
 static void arp_learn(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]) {
     sx_arp_entry_t *e = arp_lookup(arp, ip);
     int i;
+    if (e != NULL && e->is_static) {
+        return; /* 静态映射优先，忽略任何 ARP 通告（含伪造应答） */
+    }
     if (e == NULL) {
         for (i = 0; i < SX_ARP_MAX; i++) {
             if (!arp->entries[i].valid && !arp->entries[i].probing) {
@@ -269,6 +275,9 @@ void sx_arp_update(sx_arp_t *arp, uint64_t now_ms) {
     }
     for (i = 0; i < SX_ARP_MAX; i++) {
         sx_arp_entry_t *e = &arp->entries[i];
+        if (e->is_static) {
+            continue; /* 静态项不老化、不重试 */
+        }
         if (!e->valid && e->probing) {
             if (now_ms - e->ts >= SX_ARP_RETRY_MS) {
                 if (e->tries >= SX_ARP_MAX_TRIES) {

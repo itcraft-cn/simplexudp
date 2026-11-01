@@ -158,6 +158,8 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `local_ip` | 0 | 本机 IPv4（主机序）；0=不指定/由后端推导 |
+| `gateway_ip` | 0 | 跨网段下一跳 IPv4（主机序）；0=不做网关转发 |
+| `netmask` | 0 | 本接口子网掩码（主机序）；0=由 XDP 后端自动探测 |
 | `local_port` | 0 | 本地端口（主机序）；0=内核分配（UDP） |
 | `conv` | `SX_DEFAULT_CONV` | 会话/组标识 |
 
@@ -177,6 +179,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `multicast_if` | 0 | 组播出口/入组接口 IPv4（多网卡必需）；0=默认接口 |
 | `min_rto_ms` | 100 | 最小重传超时 |
 | `max_rto_ms` | 5000 | 最大重传超时 |
+| `cc_mode` | `SX_CC_ON` | `SX_CC_OFF` 关闭拥塞窗口调节，仅保留 RTO 退避/重传 |
 | `keepalive_ms` | 10000 | 空闲心跳间隔 |
 | `timeout_ms` | 30000 | 对端无响应判定为 DOWN 的阈值 |
 
@@ -235,6 +238,24 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 
 #### `sx_link_t *sx_add_unicast(sx_endpoint_t *ep, uint32_t ip, uint16_t port)`
 添加点播链路（严格可靠有序）。已存在则返回同一条。失败 NULL。
+
+#### `sx_link_t *sx_add_unicast_mac(sx_endpoint_t *ep, uint32_t ip, uint16_t port, const uint8_t mac[6])`
+添加点播链路并静态绑定目的 MAC（仅 AF_XDP 发送路径生效）。等价于
+`sx_add_unicast` + `sx_add_static_arp`；`mac` 为 NULL 时退化为普通单播。
+
+#### `int sx_add_static_arp(sx_endpoint_t *ep, uint32_t ip, const uint8_t mac[6])`
+注册静态 ARP 映射。可在 `sx_start` 前调用（启动时统一应用），也可在运行期调用。
+静态项不会被 ARP 应答覆盖，也不参与老化；UDP 后端忽略该映射。跨网段时，
+把 `gateway_ip` 设为网关地址，并为该地址注册静态映射即可。
+
+```c
+uint8_t peer_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0xaa};
+sx_add_unicast_mac(ep, ipv4("10.0.0.2"), 9000, peer_mac);
+
+cfg.gateway_ip = ipv4("10.0.0.1");
+cfg.netmask    = ipv4("255.255.255.0");
+sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
+```
 
 #### `sx_link_t *sx_add_multicast(sx_endpoint_t *ep, uint32_t group_ip, uint16_t port)`
 添加组播链路。UDP 后端会执行 `IP_ADD_MEMBERSHIP`；XDP 后端返回
@@ -328,7 +349,8 @@ void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 - 可靠性：`retransmits`、`fast_retrans`、`timeouts`、`dup_packets`、`reorder_pkts`、
   `lost_detected`、`nack_sent/nack_recv`、`dropped`、`xdp_rx_backlog`（XDP：UMEM 帧耗尽/RX 积压计数）
 - 窗口/时延：`snd_wnd`、`snd_outstanding`、`per_peer_wnd`、`cwnd`、`rtt_ms`、`rto_ms`
-- 后端：`backend`、`xdp_mode`、`xdp_bind`
+- 拥塞控制：`cc_mode`（实际生效模式）
+- 后端：`backend`、`backend_fallback`（1=AUTO 曾尝试 XDP 并回退 UDP）、`xdp_mode`、`xdp_bind`
 
 AF_XDP 还可用 `bpftool` 观察：`bpftool net show dev <if>`、`bpftool prog show`、
 `bpftool map dump name sx_stats_map`（key0=重定向到 xsk，key1=PASS）。
@@ -349,6 +371,7 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 - **单播**：严格可靠有序。累积确认（`una`，即对端 `rcv_nxt`）+ 选择性确认（`ack_list`）+
   快速重传 + RTO 退避 + RTT 估计 + 流控 + 拥塞控制（慢启动/拥塞避免/超时降窗）。
+  `cc_mode=SX_CC_OFF` 时窗口固定为 `send_window`，RTO 退避与重传保持不变。
 - **组播/广播**：尽力可靠 + 有序。发送端保留 `group_history` 条历史并周期广播高水位；
   接收端按来源侦测空洞后回送 `NACK`，发送端从历史重发到组地址。不保证送达。
 
@@ -359,8 +382,12 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 - attach：native 优先，失败回退 generic；bind：zero-copy 优先，失败回退 copy（自动侦测，
   结果见 `stats.xdp_mode/xdp_bind`）。
 - 绑定单个 RX 队列；需把目标流量引导到该队列（RSS/`ethtool -N` 或单队列网卡）。
+- **同一网卡同一时刻只支持一个 SX XDP 端点**：attach 使用 `XDP_FLAGS_UPDATE_IF_NOEXIST`，
+  不替换已有 XDP 程序。第二个端点会 attach 失败；`AUTO` 模式会回退 UDP 并置
+  `stats.backend_fallback=1`。需要多端点时请使用多网卡、多 netns，或等待共享 XDP 程序方案。
 - **ARP 由本库用户态处理**（XDP 程序把 ARP 也重定向到用户态），因此仅同一二层网段内可
-  直接解析；跨网段需网关或静态映射。
+  直接解析。生产环境建议用 `sx_add_static_arp` 固定网关/对端 MAC（免 ARP 查询，且静态项
+  不会被伪造应答覆盖）；跨网段需设置 `gateway_ip`/`netmask` 并为网关注册静态映射。
 - generic 模式强制 copy；zero-copy 需网卡驱动支持。
 - 组播在 XDP 后端需接口接受该组播（可能需要 `ip maddr add` 或 allmulti）。
 - 退出前请确保正常 `sx_stop`/`sx_destroy` 以 detach XDP；进程被 SIGKILL 会残留 XDP 程序
@@ -380,7 +407,8 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
   SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latency
   ```
 
-- **队列**：多队列网卡可将不同流 RSS 到不同队列，每队列一个端点/进程。
+- **队列**：当前一个端点绑定一个 RX 队列（`xdp_queue`），且同一网卡只能有一个 SX XDP 端点；
+  多队列横向扩展尚未实现，勿按“每队列一个端点/进程”部署。可先用多网卡/多 netns 扩展。
 - **日志**：生产建议 `SX_LOG_WARN`；调试可靠性问题时临时开 `SX_LOG_DEBUG`。
 
 ---
@@ -398,7 +426,8 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 ## 14. 常见问题（FAQ）
 
 **Q：收不到数据？**
-AF_XDP 下检查：(1) 目标流量是否被引导到绑定的 RX 队列；(2) 是否同一二层网段（ARP）；
+AF_XDP 下检查：(1) 目标流量是否被引导到绑定的 RX 队列；(2) 是否同一二层网段（ARP），
+跨网段是否配置 `gateway_ip`/`netmask` 并为网关注册静态映射；
 (3) XDP 是否成功 attach（`bpftool net show dev <if>`）；(4) 端口与 `conv` 是否一致。
 UDP 后端下检查防火墙与端口绑定。
 

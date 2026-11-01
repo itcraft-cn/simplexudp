@@ -69,7 +69,7 @@ flowchart LR
     F --> G[P2 测量增强<br/>硬件时间戳]
 ```
 
-### P0-1 静态 ARP / 静态 MAC 落地（价值最高，成本最低）
+### P0-1 静态 ARP / 静态 MAC 落地（已完成）
 
 要解决的问题：
 
@@ -89,7 +89,7 @@ flowchart LR
 
 成本：1~2 人日。风险：低。依赖：无。
 
-### P0-2 拥塞控制开关（专线模式）
+### P0-2 拥塞控制开关（专线模式，已完成）
 
 要解决的问题：内网专线不希望超时降窗把吞吐打回 1 个窗口；但必须保留 RTO 退避与重传，不能把“关 CC”实现成“关可靠性”。
 
@@ -109,7 +109,7 @@ flowchart LR
 
 成本：1 人日。风险：低。依赖：无。
 
-### P0-3 修正“多 XDP 端点”的文档与可观测性
+### P0-3 修正“多 XDP 端点”的文档与可观测性（已完成）
 
 要解决的问题：在完整的多队列方案落地前，先消除“静默降级”。
 
@@ -203,7 +203,21 @@ flowchart LR
 6. P1-3 多队列设计：先出设计结论，再决定是否投入原型。
 7. P2 项按业务需求触发，不默认排期。
 
-## 7. 验收总口径
+## 7. P0 落地记录（2026-11-02）
+
+P0-1、P0-2、P0-3 已在本日完成，P1/P2 保持待办。
+
+- P0-1 静态 ARP/MAC：新增 `sx_add_static_arp`、`sx_add_unicast_mac`；ARP 项增加 `is_static`，
+  ARP 应答与老化均跳过静态项；跨网段新增 `gateway_ip`/`netmask` 配置，二层目的 MAC 取网关注册值。
+- P0-2 CC 开关：新增 `sx_cc_mode_t` 与 `cfg.cc_mode`；`SX_CC_OFF` 时窗口固定为 `send_window`，
+  超时仅做 RTO 退避；统计新增 `cc_mode`。
+- P0-3 多 XDP 端点：attach 失败区分 `EEXIST/EBUSY` 并明确日志；AUTO 回退记录
+  `stats.backend_fallback`；README/manual/design 删除“每队列一个端点/进程”的错误表述。
+
+验证：`make check` 七项通过（新增 `test_arp`、`test_cc`，扩展 `test_loopback`），
+CMake 构建与 `ctest` 七项通过；UDP-only 与含 XDP 两种构建均无警告。
+
+## 8. 验收总口径
 
 - 功能：`make check`、`make check-xdp`、组播/广播三节点测试全部通过；
 - 契约：头文件描述与实际行为一致，不再存在“写了但不用”的公共字段；

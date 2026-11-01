@@ -57,7 +57,9 @@ Ethernet(14) | IPv4(20) | UDP(8) | SX header(32) | payload(<=1400)
 - XDP attach 模式：`native`（驱动原生）、`generic/skb`（通用，任意网卡/lo/veth）。
 - 绑定标志：`copy`（`XDP_COPY`）、`zero-copy`（`XDP_ZEROCOPY`）。
 - **自动侦测**：先尝试 `XDP_ZEROCOPY`，`xsk_socket__create` 返回 `ENOTSUP/EOPNOTSUPP` 或驱动无 zero-copy 能力时，回退到 `XDP_COPY`；XDP attach 先 native 失败再 generic。选择结果记入 `sx_stats_t.xdp_mode/xdp_bind`。
-- 队列绑定：默认 queue 0；支持多队列时每队列一个 xsk，或使用 `XDP_SHARED_UMEM`（预留扩展）。
+- 队列绑定：默认 queue 0；当前一个端点绑定一个 xsk，且同一网卡只允许一个 XDP 程序
+  （`XDP_FLAGS_UPDATE_IF_NOEXIST`）。多队列 / 多端点需要共享 XDP 程序或
+  `XDP_SHARED_UMEM`，属后续扩展。
 
 ### 3.4 XDP 程序
 
@@ -99,6 +101,7 @@ payload ...
 - 接收窗口 `rcv_wnd`：剩余重排/投递容量，随 ACK 通告。
 - 发送窗口 `snd_wnd = min(peer_wnd, cwnd)`。
 - 拥塞：慢启动（`cwnd < ssthresh` 每 ACK +1）→ 拥塞避免（每 RTT +1）；超时 `ssthresh=cwnd/2, cwnd=1`；快速重传后进入快速恢复。
+  `cc_mode=SX_CC_OFF` 时窗口固定为 `send_window`，超时只做 RTO 退避，不回退窗口。
 - 无数据可发且窗口探测：`WASK/WINS`，避免窗口零死锁（KCP 窗口探测）。
 
 ### 4.4 组播/广播的可靠性
@@ -115,7 +118,7 @@ payload ...
 
 - `conv` 为会话/组标识，由用户配置；同一组内 `conv` 一致。
 - peer 表以 `(scope, ip, port)` 为键；unicast 每对端一个独立可靠控制块；multicast/broadcast 各一个组控制块（内部以发送方地址区分来源）。
-- 地址解析：XDP 后端需目的 MAC，`sx_arp` 维护 `ip -> mac` 缓存，未命中时发 ARP 请求并缓存/超时；组播映射 `01:00:5e:...`，广播 `ff:ff:ff:ff:ff:ff`。
+- 地址解析：XDP 后端需目的 MAC，`sx_arp` 维护 `ip -> mac` 缓存，未命中时发 ARP 请求并缓存/超时；组播映射 `01:00:5e:...`，广播 `ff:ff:ff:ff:ff:ff`。静态映射通过 `sx_add_static_arp` 注册，静态项不可被 ARP 应答覆盖、不老化；跨网段由 `gateway_ip`/`netmask` 选择网关，二层目的 MAC 取网关的静态映射。
 
 ## 6. 并发与线程模型
 

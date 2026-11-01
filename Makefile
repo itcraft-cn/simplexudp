@@ -72,7 +72,7 @@ STATIC_LIB := $(BUILD)/libsimplexudp.a
 SHARED_LIB := $(BUILD)/libsimplexudp.so
 
 EXAMPLES   := $(BUILD)/sx_p2p $(BUILD)/sx_group
-TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback $(BUILD)/test_recv
+TESTS      := $(BUILD)/test_frame $(BUILD)/test_proto $(BUILD)/test_kcp $(BUILD)/test_loopback $(BUILD)/test_recv $(BUILD)/test_arp $(BUILD)/test_cc
 
 # 直接编译链接的测试/示例需显式依赖头文件。
 HEADERS := include/simplexudp.h src/sx_internal.h tests/sx_test.h
@@ -146,6 +146,8 @@ check: tests
 	@$(BUILD)/test_kcp    $(BUILD)/test_kcp.log;    echo "test_kcp    exit=$$?"
 	@$(BUILD)/test_loopback $(BUILD)/test_loopback.log; echo "test_loopback exit=$$?"
 	@$(BUILD)/test_recv   $(BUILD)/test_recv.log;   echo "test_recv   exit=$$?"
+	@$(BUILD)/test_arp    $(BUILD)/test_arp.log;    echo "test_arp    exit=$$?"
+	@$(BUILD)/test_cc     $(BUILD)/test_cc.log;     echo "test_cc     exit=$$?"
 
 # 需要 root：创建 veth 并跑 AF_XDP 端到端测试。
 check-xdp: tests-xdp

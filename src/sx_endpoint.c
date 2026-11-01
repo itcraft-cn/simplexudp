@@ -46,6 +46,7 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->pool_blocks = 0;
     cfg->min_rto_ms = 100;
     cfg->max_rto_ms = 5000;
+    cfg->cc_mode = SX_CC_ON;
     cfg->keepalive_ms = 10000;
     cfg->timeout_ms = 30000;
     cfg->umem_frames = 4096;
@@ -431,11 +432,37 @@ static sx_io_t *create_backend(sx_endpoint_t *ep, int *chosen) {
             *chosen = SX_BACKEND_XDP;
             return io;
         }
+        /* 记录自动回退，便于现场区分“本来就在 UDP”与“XDP 失败降级”。 */
+        ep->stats.backend_fallback = 1;
         sx_log(ep, SX_LOG_WARN, "xdp backend unavailable, fallback to udp");
     }
     io = sx_io_udp_create(ep);
     *chosen = SX_BACKEND_UDP;
     return io;
+}
+
+/* 把 start 前登记的静态 ARP 应用到后端。UDP 后端无二层发送路径，忽略并提示。 */
+static void ep_apply_static_arps(sx_endpoint_t *ep) {
+    size_t i;
+
+    if (ep == NULL || ep->nstatic_arps == 0) {
+        return;
+    }
+    if (ep->io == NULL || ep->io->set_static_arp == NULL) {
+        sx_log(ep, SX_LOG_INFO,
+               "static arp entries=%zu ignored by backend=%s",
+               ep->nstatic_arps, ep->io != NULL ? ep->io->name : "none");
+        return;
+    }
+    for (i = 0; i < ep->nstatic_arps; i++) {
+        const sx_static_arp_t *a = &ep->static_arps[i];
+        if (ep->io->set_static_arp(ep->io, a->ip, a->mac) != SX_OK) {
+            sx_log(ep, SX_LOG_WARN, "static arp apply failed for %u.%u.%u.%u",
+                   (a->ip >> 24) & 0xff, (a->ip >> 16) & 0xff,
+                   (a->ip >> 8) & 0xff, a->ip & 0xff);
+        }
+    }
+    sx_log(ep, SX_LOG_INFO, "static arp entries=%zu applied", ep->nstatic_arps);
 }
 
 static void *ep_thread_main(void *arg) {
@@ -466,6 +493,7 @@ int sx_start(sx_endpoint_t *ep) {
     ep->started_ms = sx_now_ms();
     ep->running = 1;
     ep->stop_flag = 0;
+    ep_apply_static_arps(ep);
     sx_ep_emit(ep, SX_EVENT_STARTED, NULL);
     sx_ep_emit(ep, SX_EVENT_BACKEND_CHOSEN, NULL);
     sx_log(ep, SX_LOG_INFO, "started backend=%s local_port=%u",
@@ -540,6 +568,7 @@ void sx_destroy(sx_endpoint_t *ep) {
     }
     (void)sx_stop(ep);
     sx_pool_destroy(&ep->pool);
+    free(ep->static_arps);
     free(ep->ifname_owned);
     pthread_mutex_destroy(&ep->log_lock);
     pthread_mutex_destroy(&ep->lock);
@@ -550,8 +579,42 @@ void sx_destroy(sx_endpoint_t *ep) {
 /* 链路管理                                                            */
 /* ------------------------------------------------------------------ */
 
+/* 登记静态 ARP（调用方须持有 ep->lock）。若后端已就绪则立即应用。
+ * 同一 IP 重复登记时覆盖旧 MAC，避免陈旧映射残留。 */
+static int ep_static_arp_add_locked(sx_endpoint_t *ep, uint32_t ip,
+                                    const uint8_t mac[6]) {
+    size_t i;
+
+    for (i = 0; i < ep->nstatic_arps; i++) {
+        if (ep->static_arps[i].ip == ip) {
+            memcpy(ep->static_arps[i].mac, mac, 6);
+            if (ep->io != NULL && ep->io->set_static_arp != NULL) {
+                return ep->io->set_static_arp(ep->io, ip, mac);
+            }
+            return SX_OK;
+        }
+    }
+    if (ep->nstatic_arps == ep->static_arps_cap) {
+        size_t cap = ep->static_arps_cap ? ep->static_arps_cap * 2u : 8u;
+        sx_static_arp_t *p = (sx_static_arp_t *)realloc(
+            ep->static_arps, cap * sizeof(*p));
+        if (p == NULL) {
+            return SX_ERR_NOMEM;
+        }
+        ep->static_arps = p;
+        ep->static_arps_cap = cap;
+    }
+    ep->static_arps[ep->nstatic_arps].ip = ip;
+    memcpy(ep->static_arps[ep->nstatic_arps].mac, mac, 6);
+    ep->nstatic_arps++;
+    if (ep->io != NULL && ep->io->set_static_arp != NULL) {
+        return ep->io->set_static_arp(ep->io, ip, mac);
+    }
+    return SX_OK;
+}
+
 static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
-                                  sx_scope_t scope) {
+                                  sx_scope_t scope, const uint8_t *mac) {
     sx_addr_t addr;
     sx_link_t *link = NULL;
 
@@ -563,6 +626,11 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
     if (scope == SX_SCOPE_UNICAST) {
         link = find_unicast(ep, ip, port);
         if (link != NULL) {
+            if (mac != NULL) {
+                /* 已存在链路：更新目的 MAC，并登记为静态项。 */
+                memcpy(link->addr.mac, mac, 6);
+                (void)ep_static_arp_add_locked(ep, ip, mac);
+            }
             pthread_mutex_unlock(&ep->lock);
             return link;
         }
@@ -571,6 +639,9 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
     addr.ip = ip;
     addr.port = port;
     addr.scope = scope;
+    if (mac != NULL && scope == SX_SCOPE_UNICAST) {
+        memcpy(addr.mac, mac, 6);
+    }
 
     link = link_new(ep, &addr);
     if (link == NULL) {
@@ -600,6 +671,9 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
         link = NULL;
         goto out;
     }
+    if (scope == SX_SCOPE_UNICAST && mac != NULL) {
+        (void)ep_static_arp_add_locked(ep, ip, mac);
+    }
     if (scope != SX_SCOPE_UNICAST) {
         /* 组播与广播统一登记到 mc_links，供按 conv 的路由查找。 */
         sx_link_t **p = (sx_link_t **)realloc(ep->mc_links,
@@ -628,17 +702,33 @@ out:
 }
 
 sx_link_t *sx_add_unicast(sx_endpoint_t *ep, uint32_t ip, uint16_t port) {
-    return add_link_common(ep, ip, port, SX_SCOPE_UNICAST);
+    return add_link_common(ep, ip, port, SX_SCOPE_UNICAST, NULL);
+}
+
+sx_link_t *sx_add_unicast_mac(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
+                              const uint8_t mac[6]) {
+    return add_link_common(ep, ip, port, SX_SCOPE_UNICAST, mac);
+}
+
+int sx_add_static_arp(sx_endpoint_t *ep, uint32_t ip, const uint8_t mac[6]) {
+    int r;
+    if (ep == NULL || mac == NULL) {
+        return SX_ERR_INVALID;
+    }
+    pthread_mutex_lock(&ep->lock);
+    r = ep_static_arp_add_locked(ep, ip, mac);
+    pthread_mutex_unlock(&ep->lock);
+    return r;
 }
 
 sx_link_t *sx_add_multicast(sx_endpoint_t *ep, uint32_t group_ip,
                             uint16_t port) {
-    return add_link_common(ep, group_ip, port, SX_SCOPE_MULTICAST);
+    return add_link_common(ep, group_ip, port, SX_SCOPE_MULTICAST, NULL);
 }
 
 sx_link_t *sx_add_broadcast(sx_endpoint_t *ep, uint32_t bcast_ip,
                             uint16_t port) {
-    return add_link_common(ep, bcast_ip, port, SX_SCOPE_BROADCAST);
+    return add_link_common(ep, bcast_ip, port, SX_SCOPE_BROADCAST, NULL);
 }
 
 int sx_link_remove(sx_endpoint_t *ep, sx_link_t *link) {
@@ -847,6 +937,7 @@ int sx_get_stats(sx_endpoint_t *ep, sx_stats_t *out) {
     }
     pthread_mutex_lock(&ep->lock);
     *out = ep->stats;
+    out->cc_mode = (uint32_t)ep->cfg.cc_mode;
     for (i = 0; i < ep->nlinks; i++) {
         sx_link_t *l = ep->links[i];
         if (l != NULL && l->kcp != NULL) {
@@ -856,6 +947,7 @@ int sx_get_stats(sx_endpoint_t *ep, sx_stats_t *out) {
             out->cwnd = l->kcp->cwnd;
             out->rtt_ms = l->kcp->srtt;
             out->rto_ms = l->kcp->rto_ms;
+            out->cc_mode = l->kcp->cc_enabled ? SX_CC_ON : SX_CC_OFF;
             break;
         }
     }
