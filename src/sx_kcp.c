@@ -99,8 +99,8 @@ static void kcp_emit(sx_kcp_t *k, uint8_t cmd, uint32_t seq, uint32_t payload_le
 }
 
 /* 发送时捎带 ack 的变体（带净荷）。 */
-static void kcp_emit_data(sx_kcp_t *k, uint32_t seq, const void *data,
-                          size_t len) {
+static void kcp_emit_data(sx_kcp_t *k, uint8_t cmd, uint32_t seq,
+                          const void *data, size_t len) {
     uint32_t list[SX_ACK_LIST_MAX] = {0};
     uint32_t n = 0;
     uint32_t i;
@@ -113,8 +113,7 @@ static void kcp_emit_data(sx_kcp_t *k, uint32_t seq, const void *data,
         k->ack_pending = 0;
         k->ack_count = 0;
     }
-    sx_kcp_send_raw(k, SX_CMD_PUSH, seq, k->rcv_nxt, k->rcv_wnd, list, n, data,
-                    len);
+    sx_kcp_send_raw(k, cmd, seq, k->rcv_nxt, k->rcv_wnd, list, n, data, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -184,6 +183,7 @@ void sx_kcp_reset(sx_kcp_t *k) {
         sx_pool_free(&k->ep->pool, k->rcv_buf[i].data);
         k->rcv_buf[i].data = NULL;
     }
+    sx_frag_reasm_reset(&k->frag);
     memset(k->snd_buf, 0, k->send_cap * sizeof(sx_msg_t));
     memset(k->rcv_buf, 0, k->recv_cap * sizeof(sx_msg_t));
     k->snd_una = 0;
@@ -217,7 +217,8 @@ void sx_kcp_destroy(sx_kcp_t *k) {
 /* 发送                                                                */
 /* ------------------------------------------------------------------ */
 
-int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
+static int64_t kcp_send_cmd(sx_kcp_t *k, uint8_t cmd, const void *data,
+                            size_t len) {
     uint32_t window;
     uint32_t seq;
     sx_msg_t *slot;
@@ -260,6 +261,7 @@ int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
     slot->xmit = 0;
     slot->fastack = 0;
     slot->flags = SX_MSG_USED;
+    slot->cmd = cmd;
     slot->data = copy;
     slot->xmit_ts = sx_now_ms();
 
@@ -267,11 +269,76 @@ int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
     k->snd_count++;
 
     /* 立即发送（捎带 ACK）。 */
-    kcp_emit_data(k, seq, copy, len);
+    kcp_emit_data(k, cmd, seq, copy, len);
     slot->xmit = 1;
     k->ep->stats.tx_packets++;
     k->ep->stats.tx_bytes += len;
     return (int64_t)seq;
+}
+
+int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
+    return kcp_send_cmd(k, SX_CMD_PUSH, data, len);
+}
+
+int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len) {
+    size_t frag_payload;
+    uint32_t cnt;
+    uint32_t i;
+    uint32_t first_seq;
+    uint32_t window;
+    uint8_t buf[SX_MAX_PAYLOAD_LIMIT];
+    const uint8_t *p = (const uint8_t *)data;
+
+    if (k == NULL || (data == NULL && len > 0)) {
+        return SX_ERR_INVALID;
+    }
+    if (len <= k->ep->cfg.max_payload) {
+        return sx_kcp_send(k, data, len);
+    }
+    if (k->ep->cfg.max_message == 0 || len > k->ep->cfg.max_message ||
+        k->ep->cfg.max_payload <= SX_FRAG_HDR_SIZE) {
+        return SX_ERR_TOO_LARGE;
+    }
+    frag_payload = k->ep->cfg.max_payload - SX_FRAG_HDR_SIZE;
+    cnt = (uint32_t)((len + frag_payload - 1u) / frag_payload);
+    if (cnt == 0 || cnt > 0xffffu) {
+        return SX_ERR_TOO_LARGE;
+    }
+    window = SX_MIN(k->snd_wnd, k->cwnd);
+    if (k->snd_count + cnt > window) {
+        return SX_ERR_WINDOW;
+    }
+    first_seq = k->snd_nxt;
+    for (i = 0; i < cnt; i++) {
+        size_t off = (size_t)i * frag_payload;
+        size_t chunk = len - off;
+        uint32_t msg_id = first_seq;
+        uint32_t total = (uint32_t)len;
+        int64_t r;
+
+        if (chunk > frag_payload) {
+            chunk = frag_payload;
+        }
+        buf[0] = (uint8_t)(msg_id >> 24);
+        buf[1] = (uint8_t)(msg_id >> 16);
+        buf[2] = (uint8_t)(msg_id >> 8);
+        buf[3] = (uint8_t)msg_id;
+        buf[4] = (uint8_t)(i >> 8);
+        buf[5] = (uint8_t)i;
+        buf[6] = (uint8_t)(cnt >> 8);
+        buf[7] = (uint8_t)cnt;
+        buf[8] = (uint8_t)(total >> 24);
+        buf[9] = (uint8_t)(total >> 16);
+        buf[10] = (uint8_t)(total >> 8);
+        buf[11] = (uint8_t)total;
+        memcpy(buf + SX_FRAG_HDR_SIZE, p + off, chunk);
+        r = kcp_send_cmd(k, SX_CMD_PUSH_FRAG, buf,
+                         SX_FRAG_HDR_SIZE + chunk);
+        if (r < 0) {
+            return r;
+        }
+    }
+    return (int64_t)first_seq;
 }
 
 /* ------------------------------------------------------------------ */
@@ -377,7 +444,7 @@ static void kcp_on_ack(sx_kcp_t *k) {
 }
 
 static void kcp_retransmit(sx_kcp_t *k, sx_msg_t *slot) {
-    kcp_emit_data(k, slot->seq, slot->data, slot->len);
+    kcp_emit_data(k, slot->cmd, slot->seq, slot->data, slot->len);
     slot->xmit++;
     slot->xmit_ts = sx_now_ms();
     slot->fastack = 0;
@@ -415,11 +482,31 @@ static void kcp_add_ack(sx_kcp_t *k, uint32_t seq) {
     k->ack_pending = 1;
 }
 
-static void kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
-    sx_ep_deliver(k->ep, k->link, k->link->addr.ip, k->link->addr.port,
-                  slot->data, slot->len);
+static void kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
+                                const uint8_t *data, size_t len) {
+    if (cmd == SX_CMD_PUSH_FRAG) {
+        const uint8_t *out = NULL;
+        size_t out_len = 0;
+        int r = sx_frag_reasm_input(&k->frag, data, len,
+                                    (uint32_t)k->ep->cfg.max_message, &out,
+                                    &out_len);
+        if (r == 1) {
+            sx_ep_deliver(k->ep, k->link, k->link->addr.ip,
+                          k->link->addr.port, out, out_len);
+            sx_frag_reasm_reset(&k->frag);
+        } else if (r < 0) {
+            k->ep->stats.dropped++;
+        }
+    } else {
+        sx_ep_deliver(k->ep, k->link, k->link->addr.ip, k->link->addr.port,
+                      data, len);
+    }
     k->ep->stats.rx_packets++;
-    k->ep->stats.rx_bytes += slot->len;
+    k->ep->stats.rx_bytes += len;
+}
+
+static void kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
+    kcp_deliver_payload(k, slot->cmd, slot->data, slot->len);
 }
 
 /* 投递按序到达的消息直到空洞。 */
@@ -454,10 +541,7 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
         /* 先推进 rcv_nxt，再投递：这样回调内若立即发送（如应用回显），
          * 其携带的累积确认 una 才是最新的，不会漏确认当前这条消息。 */
         k->rcv_nxt++;
-        sx_ep_deliver(k->ep, k->link, k->link->addr.ip, k->link->addr.port,
-                      payload, h->payload_len);
-        k->ep->stats.rx_packets++;
-        k->ep->stats.rx_bytes += h->payload_len;
+        kcp_deliver_payload(k, h->cmd, payload, h->payload_len);
         kcp_drain(k);
         kcp_add_ack(k, seq);
     } else if (sx_seq_after(seq, k->rcv_nxt) &&
@@ -481,6 +565,7 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
         }
         slot->seq = seq;
         slot->len = (uint16_t)h->payload_len;
+        slot->cmd = h->cmd;
         slot->flags = SX_MSG_USED;
         slot->xmit = 0;
         slot->fastack = 0;
@@ -579,6 +664,7 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
 
     switch (h.cmd) {
     case SX_CMD_PUSH:
+    case SX_CMD_PUSH_FRAG:
         kcp_input_push(k, &h, payload, now_ms);
         if (!k->established && h.peer_id != 0) {
             k->established = 1;

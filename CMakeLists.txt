@@ -52,6 +52,7 @@ set(SX_SOURCES
     src/sx_frame.c
     src/sx_arp.c
     src/sx_kcp.c
+    src/sx_frag.c
     src/sx_group.c
     src/sx_io_udp.c
     src/sx_io_xdp.c
@@ -80,7 +81,7 @@ target_link_libraries(sx_group PRIVATE simplexudp ${LIBBPF_LIBRARIES}
                                               ${LIBXDP_LIBRARIES} pthread)
 
 enable_testing()
-foreach(t frame proto kcp loopback recv arp cc)
+foreach(t frame proto kcp loopback recv arp cc frag)
     add_executable(test_${t} tests/test_${t}.c)
     target_include_directories(test_${t} PRIVATE src)
     target_link_libraries(test_${t} PRIVATE simplexudp ${LIBBPF_LIBRARIES}

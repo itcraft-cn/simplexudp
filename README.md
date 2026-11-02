@@ -3,7 +3,7 @@
 基于 **XDP + AF_XDP** 的 Linux 底层通讯库（ANSI C），同时提供**内核 UDP socket** 后端作为兼容/测试路径。向上提供消息导向、**有序可靠**、**丢包侦测重发**、支持**点播/组播/广播**的通讯能力。
 
 - 目标平台：Linux x86_64 / aarch64，C99。
-- 单包净荷上限固定（默认 1400），严格小于 MTU，禁止分片。
+- 单包净荷上限固定（默认 1400），严格小于 MTU，不做 IP 分片；超过上限的消息自动拆包/重组。
 - 可靠性借鉴 **KCP**：滑动窗口、累积+选择性确认、快速重传、RTO 退避、RTT 估计、流控与拥塞控制；专线可设 `SX_CC_OFF` 关闭窗口调节。
 - 组播/广播采用 **高水位 + NACK** 的尽力可靠（best-effort reliable）+ 按序投递。
 - AF_XDP 支持静态 ARP（不可被应答覆盖）与跨网段网关配置。
@@ -135,7 +135,7 @@ sx_endpoint_t *ep = sx_create(&cfg);
 sx_start(ep);
 
 sx_link_t *peer = sx_add_unicast(ep, ipv4("10.0.0.2"), 9000);
-sx_send(ep, peer, buf, len);            /* len <= sx_max_payload(ep) */
+sx_send(ep, peer, buf, len);            /* 超过 max_payload 自动分片 */
 
 for (;;) sx_update(ep, 0);             /* 或 sx_run(ep, -1) */
 

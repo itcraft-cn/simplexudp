@@ -43,6 +43,10 @@ enum sx_cmd {
 /* 头部之后可选的 ACK/NACK 序号列表条数上限（单包内）。 */
 #define SX_ACK_LIST_MAX 64
 
+/* 分片头：msg_id(4) + frag_idx(2) + frag_cnt(2) + total_len(4)。 */
+#define SX_FRAG_HDR_SIZE 12u
+#define SX_CMD_PUSH_FRAG 0x5au
+
 /* 单端点最大链路数（含自动学习），防止无界增长/DoS（默认值，可配置）。 */
 #define SX_MAX_PEERS 1024
 /* 单次 update 最多收取的报文数（默认值，可配置）。 */
@@ -171,6 +175,7 @@ typedef struct sx_msg {
     uint16_t xmit;      /* 重传次数 */
     uint16_t fastack;   /* 被跨越（快速重传）计数 */
     uint16_t flags;     /* SX_MSG_* */
+    uint8_t cmd;        /* 原始命令（PUSH/PUSH_FRAG） */
     uint64_t xmit_ts;   /* 最近一次发送时间 */
     uint8_t *data;      /* 拥有的净荷 */
 } sx_msg_t;
@@ -262,6 +267,23 @@ void sx_arp_set_local(sx_arp_t *arp, uint32_t ip, const uint8_t mac[6]);
 /* 直接发送以太帧（XDP 后端注入回调）。 */
 int sx_io_xdp_send_frame(sx_io_t *io, const uint8_t *frame, size_t len);
 
+/* 单条消息的分片重组状态。 */
+typedef struct sx_frag_reasm {
+    uint32_t msg_id;
+    uint32_t total_len;
+    uint32_t received;
+    uint16_t next_idx;
+    uint16_t frag_cnt;
+    uint8_t *buf;
+    int active;
+} sx_frag_reasm_t;
+
+void sx_frag_reasm_reset(sx_frag_reasm_t *r);
+/* 输入一片；返回 1=完整消息（out/out_len 指向内部 buffer），0=继续等待，<0=丢弃。 */
+int sx_frag_reasm_input(sx_frag_reasm_t *r, const uint8_t *payload, size_t len,
+                        uint32_t max_total, const uint8_t **out,
+                        size_t *out_len);
+
 /* ------------------------------------------------------------------ */
 /* KCP 可靠引擎（sx_kcp.c）                                            */
 /* ------------------------------------------------------------------ */
@@ -280,6 +302,7 @@ typedef struct sx_kcp {
     uint32_t cwnd;       /* 拥塞窗口（消息数） */
     uint32_t cwnd_cnt;   /* 拥塞避免计数 */
     uint32_t ssthresh;
+    sx_frag_reasm_t frag; /* 分片重组状态 */
     int cc_enabled;      /* 0 = 专线模式，窗口不随 ACK/超时变化 */
     int rto_backoff;     /* 1 = 超时 RTO 指数退避；0 = 固定 RTO */
     uint32_t send_cap;   /* 发送环容量（2 的幂） */
@@ -326,6 +349,8 @@ void sx_kcp_reset(sx_kcp_t *k);
 
 /* 入队并立即发送一条消息。返回 seq 或负错误码。 */
 int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len);
+/* 发送一条消息；超过 max_payload 时自动分片。返回首片序号或负错误码。 */
+int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len);
 
 /* 收到一个完整 SX 报文（seg 以 SX 头开始，seg_len 为整包长度）。 */
 void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,

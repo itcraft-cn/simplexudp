@@ -9,6 +9,7 @@
  */
 #include "../src/sx_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -23,6 +24,8 @@ typedef struct ctx {
     uint32_t got;
     uint32_t ooo;
     sx_link_t *link;
+    size_t big_len;
+    int big_ok;
 } ctx_t;
 
 static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
@@ -34,7 +37,16 @@ static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
         c->link = link;
     }
     if (len != sizeof(v)) {
-        c->ooo++;
+        size_t i;
+        const uint8_t *p = (const uint8_t *)data;
+        c->big_len = len;
+        c->big_ok = 1;
+        for (i = 0; i < len; i++) {
+            if (p[i] != (uint8_t)(i * 17u + 3u)) {
+                c->big_ok = 0;
+                break;
+            }
+        }
         return;
     }
     memcpy(&v, data, sizeof(v));
@@ -166,12 +178,30 @@ int main(int argc, char **argv) {
     T_CHECK(cctx.got == NMSG, "client received all replies");
     T_CHECK(cctx.ooo == 0, "client in-order");
 
-    /* 超限报文拒绝（净荷 > 上限）。 */
+    /* 超过 max_message 拒绝；超过 max_payload 但未超 max_message 自动分片。 */
     {
-        uint8_t big[SX_MAX_PAYLOAD_LIMIT + 8];
-        memset(big, 0, sizeof(big));
-        T_CHECK(sx_send(cli, cl, big, sizeof(big)) == SX_ERR_TOO_LARGE,
-                "oversize send rejected");
+        size_t maxm = sx_max_message(cli);
+        uint8_t *huge = (uint8_t *)malloc(maxm + 1);
+        uint8_t big[4000];
+        size_t i;
+        T_CHECK(maxm >= sizeof(big), "max_message covers 4000");
+        T_CHECK(huge != NULL, "huge alloc");
+        if (huge != NULL) {
+            memset(huge, 0, maxm + 1);
+            T_CHECK(sx_send(cli, cl, huge, maxm + 1) == SX_ERR_TOO_LARGE,
+                    "oversize message rejected");
+            free(huge);
+        }
+        for (i = 0; i < sizeof(big); i++) {
+            big[i] = (uint8_t)(i * 17u + 3u);
+        }
+        T_CHECK(sx_send(cli, cl, big, sizeof(big)) >= 0,
+                "fragmented send accepted");
+        for (i = 0; i < 4000 && sctx.big_len == 0; i++) {
+            pump(srv, cli, 1);
+        }
+        T_CHECK(sctx.big_len == sizeof(big), "fragmented message reassembled");
+        T_CHECK(sctx.big_ok == 1, "fragmented message content");
     }
 
     sx_destroy(cli);

@@ -36,7 +36,7 @@ SX 是一个底层通讯库，数据面可选：
 
 向上提供消息导向（一包一消息）的接口，具备：
 
-- 单包净荷上限固定（默认 1400，严格小于 MTU），不分片；
+- 单包净荷上限固定（默认 1400，严格小于 MTU），不做 IP 分片；超过上限的消息由库自动拆包/重组。
 - 时序有序、丢包侦测与重发（借鉴 KCP）；
 - 点对点（unicast，严格可靠有序）、组播/广播（尽力可靠 + 有序）。
 
@@ -55,7 +55,7 @@ sx_endpoint_t  端点：一个本地 ip:port + 数据面后端 + 若干链路
 ```
 
 - **conv**：会话/组标识。同一会话两端 `conv` 必须一致；库按 `conv` 与来源地址分用报文。
-- **消息**：一次 `sx_send` 对应一个序号、一个 UDP 报文，长度不得超过 `sx_max_payload()`。
+- **消息**：一次 `sx_send` 对应一条消息；长度 <= `sx_max_payload()` 时单包发送，超过时自动拆成多个分片（上限 `sx_max_message()`）。
 - **对端学习**：点播服务端无需预先登记客户端；收到 `conv` 匹配的报文会自动建立链路并
   触发 `SX_EVENT_PEER_ADDED`。
 - **回调 vs 拉取**：设置 `on_recv` 为回调模式；未设置则用 `sx_recv()` 拉取。
@@ -101,7 +101,7 @@ sx_endpoint_t *ep = sx_create(&cfg);
 sx_start(ep);
 
 sx_link_t *peer = sx_add_unicast(ep, ipv4("10.0.0.2"), 9000);
-sx_send(ep, peer, buf, len);      /* len <= sx_max_payload(ep) */
+sx_send(ep, peer, buf, len);      /* <= sx_max_payload 单包；更大自动分片 */
 
 while (running) {
     sx_wait(ep, 100);             /* 阻塞等待可读（也可用 sx_run） */
@@ -170,6 +170,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `max_payload` | 1400 | 单包净荷上限；0→1400；超过 1426 会被钳制 |
+| `max_message` | 65536 | 单条消息上限；超过 `max_payload` 自动分片；设为 `max_payload` 可关闭。分片需要一次性放入发送窗口，建议 `max_message <= send_window * (max_payload-12)` |
 | `send_window` | 256 | 发送窗口（消息数），同时决定发送环容量 |
 | `recv_window` | 1024 | 接收窗口/乱序重排容量 |
 | `group_history` | 1024 | 组播/广播发送历史条数（NACK 恢复用） |
@@ -275,7 +276,7 @@ sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
 #### `int64_t sx_send(sx_endpoint_t *ep, sx_link_t *link, const void *data, size_t len)`
 发送一条消息。返回消息序号（`>=0`），或负错误码：
 
-- `SX_ERR_TOO_LARGE`：`len > sx_max_payload(ep)`；
+- `SX_ERR_TOO_LARGE`：`len > sx_max_message(ep)`（单播）；组播/广播仍限制为 `max_payload`；
 - `SX_ERR_WINDOW`：发送窗口已满，需稍后重试；
 - `SX_ERR_CLOSED`：端点未启动或已停止。
 
@@ -306,7 +307,10 @@ sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
 链路的可用发送窗口（消息数 = `min(对端通告窗口, 拥塞窗口)`）。
 
 #### `size_t sx_max_payload(const sx_endpoint_t *ep)`
-配置的单包净荷上限，便于应用切分消息。
+配置的单包净荷上限（分片大小）。
+
+#### `size_t sx_max_message(const sx_endpoint_t *ep)`
+自动分片重组后的单条消息上限。
 
 ### 7.6 回调
 
@@ -330,7 +334,7 @@ void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 | 0 | `SX_OK` | 成功 |
 | -1 | `SX_ERR_INVALID` | 参数非法 |
 | -2 | `SX_ERR_NOMEM` | 内存不足 |
-| -3 | `SX_ERR_TOO_LARGE` | 净荷超过上限 |
+| -3 | `SX_ERR_TOO_LARGE` | 消息超过 `max_message`，或组播/广播超过 `max_payload` |
 | -4 | `SX_ERR_NOT_FOUND` | 资源不存在 |
 | -5 | `SX_ERR_EXISTS` | 已存在 |
 | -6 | `SX_ERR_AGAIN` | 暂不可用/无数据 |
@@ -400,7 +404,7 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 ## 12. 调优指南
 
-- **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；本库不分片。
+- **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；不做 IP 分片。超大消息由 `max_message` 控制应用层分片。
 - **窗口**：`send_window`/`recv_window` 影响吞吐与内存；高 BDP 链路可增大。
 - **RTO**：局域网可减小 `min_rto_ms`（如 20~50）；跨广域网保持 100+。
 - **RTO 退避**：默认指数退避；专线可在确认链路无拥塞、仅有随机丢包时设 `rto_backoff=0`，
@@ -443,7 +447,7 @@ UDP 后端下检查防火墙与端口绑定。
 发送窗口已满，稍后重试（先 `sx_update`/`sx_wait` 处理 ACK 打开窗口），或用 `sx_link_wnd` 判断。
 
 **Q：单包最大能多大？**
-`sx_max_payload(ep)`，默认 1400，绝对上限 1426。超出返回 `SX_ERR_TOO_LARGE`。
+`sx_max_payload(ep)`，默认 1400，绝对上限 1426；单条消息上限由 `sx_max_message(ep)` 控制，默认 64KB。
 
 **Q：组播/广播会重传吗？**
 会，但为“尽力可靠”：接收端侦测空洞后回送 NACK，发送端从历史重发到组地址；不保证送达。

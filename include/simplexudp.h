@@ -202,6 +202,8 @@ typedef struct sx_config {
 
     /* ---- 协议参数 ---- */
     size_t max_payload;    /* 单包净荷上限，<= 1400 且 < MTU；0 -> 默认 1400 */
+    size_t max_message;    /* 单条消息上限；超过 max_payload 时自动分片重组。
+                            * 0 -> 默认 64KB；设为 max_payload 可关闭分片。 */
     uint32_t send_window;  /* 发送窗口（消息数），默认 256 */
     uint32_t recv_window;  /* 接收窗口/重排缓冲（消息数），默认 1024 */
     uint32_t group_history;/* 组播/广播历史条数，默认 1024 */
@@ -328,6 +330,9 @@ uint32_t sx_link_wnd(const sx_link_t *link);
 
 /* 填充配置使用的单包净荷上限（便于应用切分）。 */
 size_t sx_max_payload(const sx_endpoint_t *ep);
+
+/* 单条消息上限（自动分片重组后的完整长度）。 */
+size_t sx_max_message(const sx_endpoint_t *ep);
 
 #ifdef __cplusplus
 }

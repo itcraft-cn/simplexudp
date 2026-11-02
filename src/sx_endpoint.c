@@ -36,6 +36,7 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->xdp_queue = 0;
     cfg->conv = SX_DEFAULT_CONV;
     cfg->max_payload = SX_MAX_PAYLOAD_DEFAULT;
+    cfg->max_message = 64u * 1024u;
     cfg->send_window = 256;
     cfg->recv_window = 1024;
     cfg->group_history = 1024;
@@ -367,6 +368,15 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
     }
     if (ep->cfg.max_payload > SX_MAX_PAYLOAD_LIMIT) {
         ep->cfg.max_payload = SX_MAX_PAYLOAD_LIMIT;
+    }
+    if (ep->cfg.max_message == 0) {
+        ep->cfg.max_message = 64u * 1024u;
+    }
+    if (ep->cfg.max_message < ep->cfg.max_payload) {
+        ep->cfg.max_message = ep->cfg.max_payload;
+    }
+    if (ep->cfg.max_message > 0xffffffffu) {
+        ep->cfg.max_message = 0xffffffffu; /* 分片头 total_len 为 32 位 */
     }
     if (ep->cfg.conv == 0) {
         ep->cfg.conv = SX_DEFAULT_CONV;
@@ -772,7 +782,7 @@ int64_t sx_send(sx_endpoint_t *ep, sx_link_t *link, const void *data,
     if (ep == NULL || link == NULL) {
         return SX_ERR_INVALID;
     }
-    if (len > ep->cfg.max_payload) {
+    if (len > ep->cfg.max_message) {
         return SX_ERR_TOO_LARGE;
     }
     pthread_mutex_lock(&ep->lock);
@@ -781,8 +791,13 @@ int64_t sx_send(sx_endpoint_t *ep, sx_link_t *link, const void *data,
         return SX_ERR_CLOSED;
     }
     if (link->scope == SX_SCOPE_UNICAST) {
-        r = sx_kcp_send(link->kcp, data, len);
+        r = sx_kcp_send_message(link->kcp, data, len);
     } else {
+        /* 组播/广播暂不分片：保持 best-effort 单包语义。 */
+        if (len > ep->cfg.max_payload) {
+            pthread_mutex_unlock(&ep->lock);
+            return SX_ERR_TOO_LARGE;
+        }
         r = sx_group_send(link->group, data, len);
     }
     pthread_mutex_unlock(&ep->lock);
@@ -988,4 +1003,11 @@ size_t sx_max_payload(const sx_endpoint_t *ep) {
         return 0;
     }
     return ep->cfg.max_payload;
+}
+
+size_t sx_max_message(const sx_endpoint_t *ep) {
+    if (ep == NULL) {
+        return 0;
+    }
+    return ep->cfg.max_message;
 }
