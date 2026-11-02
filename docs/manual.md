@@ -170,9 +170,9 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `max_payload` | 1400 | 单包净荷上限；0→1400；超过 1426 会被钳制 |
-| `max_message` | 65536 | 单条消息上限；超过 `max_payload` 自动分片；设为 `max_payload` 可关闭。分片需要一次性放入发送窗口，建议 `max_message <= send_window * (max_payload-12)` |
-| `send_window` | 256 | 发送窗口（消息数），同时决定发送环容量 |
-| `recv_window` | 1024 | 接收窗口/乱序重排容量 |
+| `max_message` | 65536 | 单条消息上限，最大 256KB；超过 `max_payload` 自动分片；设为 `max_payload` 可关闭 |
+| `send_window` | 256 | 发送窗口（消息数）；会自动提升到能容纳 `max_message` 的分片数，硬下限 256，上限 65536 |
+| `recv_window` | 1024 | 接收窗口/乱序重排容量；同样按 `max_message` 自动提升，硬下限 256 |
 | `group_history` | 1024 | 组播/广播发送历史条数（NACK 恢复用） |
 | `group_reorder` | 256 | 组播/广播接收重排窗口（向上取 2 的幂） |
 | `group_max_src` | 32 | 组播/广播来源表大小 |
@@ -405,6 +405,8 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 ## 12. 调优指南
 
 - **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；不做 IP 分片。超大消息由 `max_message` 控制应用层分片。
+- **窗口**：`send_window`/`recv_window` 会按 `ceil(max_message/(max_payload-12))` 自动提升，硬下限 256、上限 65536。
+  这样 256KB 消息在默认 1400B 分片下（189 片）可以一次放入窗口。
 - **窗口**：`send_window`/`recv_window` 影响吞吐与内存；高 BDP 链路可增大。
 - **RTO**：局域网可减小 `min_rto_ms`（如 20~50）；跨广域网保持 100+。
 - **RTO 退避**：默认指数退避；专线可在确认链路无拥塞、仅有随机丢包时设 `rto_backoff=0`，

@@ -97,6 +97,9 @@ int main(int argc, char **argv) {
     scfg.on_recv = on_recv;
     scfg.user = &sctx;
     scfg.log_level = SX_LOG_ERROR;
+    scfg.max_message = 256u * 1024u;
+    scfg.send_window = 64;  /* 应被 sx_create 提升到分片硬下限 */
+    scfg.recv_window = 64;
 
     ccfg = scfg;
     ccfg.user = &cctx;
@@ -109,6 +112,8 @@ int main(int argc, char **argv) {
     if (srv == NULL) {
         T_END();
     }
+    T_CHECK(srv->cfg.send_window >= SX_SEND_WINDOW_HARD_MIN,
+            "server send window raised");
     T_CHECK(sx_start(srv) == SX_OK, "server start");
     sport = srv->cfg.local_port;
     T_CHECK(sport != 0, "server bound port");
@@ -121,6 +126,8 @@ int main(int argc, char **argv) {
     /* 静态 ARP 允许在 start 前登记；UDP 后端启动时忽略，但 API 必须成功。 */
     T_CHECK(sx_add_static_arp(cli, 0x7f000001u, static_mac) == SX_OK,
             "static arp before start");
+    T_CHECK(cli->cfg.send_window >= SX_SEND_WINDOW_HARD_MIN,
+            "client send window raised");
     T_CHECK(sx_start(cli) == SX_OK, "client start");
     {
         sx_stats_t st;
@@ -202,6 +209,28 @@ int main(int argc, char **argv) {
         }
         T_CHECK(sctx.big_len == sizeof(big), "fragmented message reassembled");
         T_CHECK(sctx.big_ok == 1, "fragmented message content");
+    }
+    /* 200KB 消息：验证窗口硬下限与 256KB 分片能力。 */
+    {
+        size_t big_len = 200u * 1024u;
+        uint8_t *big = (uint8_t *)malloc(big_len);
+        size_t i;
+        sctx.big_len = 0;
+        sctx.big_ok = 0;
+        T_CHECK(big != NULL, "200KB alloc");
+        if (big != NULL) {
+            for (i = 0; i < big_len; i++) {
+                big[i] = (uint8_t)(i * 17u + 3u);
+            }
+            T_CHECK(sx_send(cli, cl, big, big_len) >= 0,
+                    "200KB fragmented send accepted");
+            for (i = 0; i < 20000 && sctx.big_len == 0; i++) {
+                pump(srv, cli, 1);
+            }
+            T_CHECK(sctx.big_len == big_len, "200KB message reassembled");
+            T_CHECK(sctx.big_ok == 1, "200KB message content");
+            free(big);
+        }
     }
 
     sx_destroy(cli);

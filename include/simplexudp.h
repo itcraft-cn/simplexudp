@@ -36,6 +36,13 @@ extern "C" {
 /* 协议允许的绝对上限：1500(MTU) - 14(Eth) - 20(IP) - 8(UDP) - 32(SX) = 1426。 */
 #define SX_MAX_PAYLOAD_LIMIT 1426
 
+/* 自动分片单条消息的硬上限：256KB。 */
+#define SX_MAX_MESSAGE_LIMIT (256u * 1024u)
+/* 发送/接收窗口硬下限：至少覆盖 256KB 在 1400B 分片下的 189 个分片。 */
+#define SX_SEND_WINDOW_HARD_MIN 256u
+/* 窗口绝对上限，防止配置错误导致超大内存分配。 */
+#define SX_SEND_WINDOW_LIMIT 65536u
+
 /* 默认会话/组标识。 */
 #define SX_DEFAULT_CONV 0x00000001u
 

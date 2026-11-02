@@ -372,11 +372,36 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
     if (ep->cfg.max_message == 0) {
         ep->cfg.max_message = 64u * 1024u;
     }
+    if (ep->cfg.max_message > SX_MAX_MESSAGE_LIMIT) {
+        ep->cfg.max_message = SX_MAX_MESSAGE_LIMIT;
+    }
     if (ep->cfg.max_message < ep->cfg.max_payload) {
         ep->cfg.max_message = ep->cfg.max_payload;
     }
-    if (ep->cfg.max_message > 0xffffffffu) {
-        ep->cfg.max_message = 0xffffffffu; /* 分片头 total_len 为 32 位 */
+    /* 自动分片要求一条消息的所有分片能放入窗口；按 max_message 推导硬下限。
+     * 用户显式设置更大的窗口时保持更大的值。 */
+    {
+        size_t frag_payload =
+            ep->cfg.max_payload > SX_FRAG_HDR_SIZE
+                ? ep->cfg.max_payload - SX_FRAG_HDR_SIZE
+                : 1u;
+        uint32_t need =
+            (uint32_t)((ep->cfg.max_message + frag_payload - 1u) / frag_payload);
+        if (need < 1u) {
+            need = 1u;
+        }
+        if (need < SX_SEND_WINDOW_HARD_MIN) {
+            need = SX_SEND_WINDOW_HARD_MIN;
+        }
+        if (need > SX_SEND_WINDOW_LIMIT) {
+            need = SX_SEND_WINDOW_LIMIT;
+        }
+        if (ep->cfg.send_window < need) {
+            ep->cfg.send_window = need;
+        }
+        if (ep->cfg.recv_window < need) {
+            ep->cfg.recv_window = need;
+        }
     }
     if (ep->cfg.conv == 0) {
         ep->cfg.conv = SX_DEFAULT_CONV;
