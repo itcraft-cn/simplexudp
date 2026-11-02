@@ -68,6 +68,7 @@ make relay-tool      # 三跳接力：build/test_relay
 make xdp-echo        # 纯 XDP_TX 反射程序与加载器（微基准）
 make test-xdp-echo   # 纯 XDP_TX 反射的 RTT 发送端
 make test-io-echo    # 统一 IO 抽象：UDP/AF_XDP 发送端 RTT 对比
+make test-hwts       # UDP 硬件时间戳单向测量（需 PTP 同步）
 
 make check           # 运行单元/回环测试（无需 root，UDP 后端）
 make check-xdp       # 需要 root：创建 veth 跑 AF_XDP 端到端测试
