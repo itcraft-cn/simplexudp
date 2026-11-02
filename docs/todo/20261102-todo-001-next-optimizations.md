@@ -28,12 +28,13 @@
 - 目标：进程级 XDP 管理器，共享 BPF 对象、`xsks_map`、端口配置；引用计数，最后一个退出时 detach。
 - 验收：同网卡两个 SX 端点同时工作；一个退出不影响另一个。
 
-## P2：AF_XDP 硬件时间戳数据面
+## P2：AF_XDP 硬件时间戳数据面（已实现，待支持网卡验证）
 
-- 现状：仅探测并回退；Linux < 6.7 无 XDP RX metadata timestamp。
-- 目标：内核 >= 6.7 且驱动支持时，通过 XDP metadata/hints 读取 RX PHC 时间，
-  填充 `sx_pkt_info_t`。
-- 依赖：内核升级、libbpf/headers 支持、驱动验证。
+- 已实现：`bpf/sx_xdp_ts_kern.c` 用 `bpf_xdp_adjust_meta` + `bpf_xdp_metadata_rx_timestamp`
+  写入 16 字节 metadata；用户态从 UMEM headroom 读取并填充 `sx_pkt_info_t`。
+- 探测：内核 < 6.7 报 `-2`；内核 >= 6.7 但驱动不支持时，TS 程序加载失败自动回退默认程序，
+  `HARDWARE` 报 `-1`，`AUTO` 回退软件时间戳。
+- 待验证：需要支持 XDP metadata timestamp 的网卡（本机 lo/e1000e 不支持）。
 - 验收：AF_XDP `rx_ts_mode=HARDWARE`，与 UDP 硬件时间戳对照误差在 PTP 精度内。
 
 ## P3：发送硬件时间戳

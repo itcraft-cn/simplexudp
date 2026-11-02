@@ -61,9 +61,19 @@ int sx_io_xdp_send_frame(sx_io_t *io, const uint8_t *frame, size_t len) {
 #include <linux/if_link.h>
 #include <xdp/xsk.h>
 
+#include "../bpf/sx_xdp_meta.h"
+
+#ifndef BPF_F_XDP_DEV_BOUND_ONLY
+#define BPF_F_XDP_DEV_BOUND_ONLY (1U << 6)
+#endif
+
 #ifdef SX_XDP_EMBEDDED
 extern const unsigned char sx_xdp_kern_o[];
 extern const unsigned int sx_xdp_kern_o_len;
+#endif
+#ifdef SX_XDP_TS_EMBEDDED
+extern const unsigned char sx_xdp_ts_kern_o[];
+extern const unsigned int sx_xdp_ts_kern_o_len;
 #endif
 
 #define SX_XDP_UMEM_FRAMES_DEFAULT 4096u
@@ -113,6 +123,8 @@ typedef struct sx_xdp_priv {
     int ts_mode;
     int ts_status;
     int ts_clock;
+    int ts_want;
+    int ts_load_failed;
 } sx_xdp_priv_t;
 
 /* 解析接口 MAC、IPv4 地址与子网掩码。 */
@@ -391,6 +403,34 @@ static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
                 if (src_ip) *src_ip = sip;
                 if (src_port) *src_port = sp;
                 if (len) *len = copy;
+                if (info != NULL) {
+                    memset(info, 0, sizeof(*info));
+                    info->ts_mode = (uint32_t)p->ts_mode;
+                    info->ts_status = (uint32_t)p->ts_status;
+                    info->clock_id = (uint32_t)p->ts_clock;
+                    if (p->ts_mode == SX_RX_TS_HARDWARE) {
+                        struct sx_xdp_meta *meta =
+                            (struct sx_xdp_meta *)(frame - sizeof(*meta));
+                        if (meta->valid) {
+                            info->rx_ns = meta->rx_timestamp;
+                            info->clock_id = SX_RX_TS_CLOCK_PHC;
+                            info->ts_status = SX_RX_TS_HW_OK;
+                            info->valid = 1;
+                        } else {
+                            info->ts_status =
+                                (uint32_t)(meta->err ? meta->err
+                                                    : SX_RX_TS_ERR_IO);
+                        }
+                    } else if (p->ts_mode == SX_RX_TS_AUTO) {
+                        struct timespec ts;
+                        clock_gettime(CLOCK_REALTIME, &ts);
+                        info->rx_ns = (uint64_t)ts.tv_sec * 1000000000ull +
+                                      (uint64_t)ts.tv_nsec;
+                        info->clock_id = SX_RX_TS_CLOCK_REALTIME;
+                        info->ts_status = SX_RX_TS_SW_FALLBACK;
+                        info->valid = 1;
+                    }
+                }
                 xdp_frame_release(p, addr);
                 xsk_ring_cons__release(&p->rx, 1);
                 return 1;
@@ -492,8 +532,19 @@ static int xdp_bind_socket(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     return SX_OK;
 }
 
+static int xdp_kernel_ge(int want_major, int want_minor) {
+    struct utsname u;
+    int major = 0;
+    int minor = 0;
+    if (uname(&u) != 0) {
+        return 0;
+    }
+    (void)sscanf(u.release, "%d.%d", &major, &minor);
+    return major > want_major || (major == want_major && minor >= want_minor);
+}
+
 /* 打开 XDP 目标对象：优先环境变量 SX_XDP_OBJ，其次编译期内嵌对象。 */
-static struct bpf_object *xdp_open_object(sx_endpoint_t *ep) {
+static struct bpf_object *xdp_open_object(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     struct bpf_object *obj;
     long err;
     const char *path = getenv("SX_XDP_OBJ");
@@ -507,6 +558,19 @@ static struct bpf_object *xdp_open_object(sx_endpoint_t *ep) {
         }
         return obj;
     }
+#ifdef SX_XDP_TS_EMBEDDED
+    if (p->ts_want) {
+        obj = bpf_object__open_mem(sx_xdp_ts_kern_o, sx_xdp_ts_kern_o_len,
+                                   NULL);
+        err = libbpf_get_error(obj);
+        if (err != 0) {
+            sx_log(ep, SX_LOG_ERROR, "open embedded ts xdp obj failed: %ld",
+                   err);
+            return NULL;
+        }
+        return obj;
+    }
+#endif
 #ifdef SX_XDP_EMBEDDED
     obj = bpf_object__open_mem(sx_xdp_kern_o, sx_xdp_kern_o_len, NULL);
     err = libbpf_get_error(obj);
@@ -588,19 +652,56 @@ static int xdp_load_program(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     struct bpf_program *prog;
     struct bpf_map *map;
 
-    obj = xdp_open_object(ep);
+    obj = xdp_open_object(p, ep);
     if (obj == NULL) {
-        return SX_ERR_BACKEND;
-    }
-    if (bpf_object__load(obj) != 0) {
-        sx_log(ep, SX_LOG_ERROR, "load xdp obj failed");
-        bpf_object__close(obj);
         return SX_ERR_BACKEND;
     }
     prog = bpf_object__find_program_by_name(obj, "sx_xdp_redirect_prog");
     if (prog == NULL) {
         bpf_object__close(obj);
         return SX_ERR_BACKEND;
+    }
+#ifdef SX_XDP_TS_EMBEDDED
+    if (p->ts_want) {
+        /* XDP metadata kfunc 只允许 device-bound 程序访问；必须同时指定 ifindex。 */
+        bpf_program__set_ifindex(prog, p->ifindex);
+        if (bpf_program__set_flags(prog, BPF_F_XDP_DEV_BOUND_ONLY) != 0) {
+            bpf_object__close(obj);
+            return SX_ERR_BACKEND;
+        }
+        sx_log(ep, SX_LOG_INFO, "xdp ts program ifindex=%d flags=0x%x",
+               p->ifindex, bpf_program__flags(prog));
+    }
+#endif
+    if (bpf_object__load(obj) != 0) {
+        if (p->ts_want) {
+            /* 内核支持 metadata，但当前驱动/接口不支持；回退默认程序。 */
+            sx_log(ep, SX_LOG_WARN,
+                   "xdp metadata timestamp program load failed; fallback "
+                   "without timestamp");
+            bpf_object__close(obj);
+            p->ts_want = 0;
+            p->ts_load_failed = 1;
+            obj = xdp_open_object(p, ep);
+            if (obj == NULL) {
+                return SX_ERR_BACKEND;
+            }
+            prog = bpf_object__find_program_by_name(obj,
+                                                    "sx_xdp_redirect_prog");
+            if (prog == NULL) {
+                bpf_object__close(obj);
+                return SX_ERR_BACKEND;
+            }
+            if (bpf_object__load(obj) != 0) {
+                sx_log(ep, SX_LOG_ERROR, "load fallback xdp obj failed");
+                bpf_object__close(obj);
+                return SX_ERR_BACKEND;
+            }
+        } else {
+            sx_log(ep, SX_LOG_ERROR, "load xdp obj failed");
+            bpf_object__close(obj);
+            return SX_ERR_BACKEND;
+        }
     }
     p->obj = obj;
 
@@ -740,7 +841,9 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     ucfg.fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
     ucfg.comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
     ucfg.frame_size = p->frame_size;
-    ucfg.frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM;
+    ucfg.frame_headroom = sizeof(struct sx_xdp_meta) > 16
+                              ? sizeof(struct sx_xdp_meta)
+                              : 16;
     ucfg.flags = XSK_UMEM__DEFAULT_FLAGS;
 
     ret = xsk_umem__create(&p->umem, p->umem_area, p->umem_size, &p->fq, &p->cq,
@@ -757,6 +860,8 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     io->ep = ep;
     io->priv = p;
 
+    p->ts_want = (ep->cfg.rx_ts_mode != SX_RX_TS_OFF &&
+                  xdp_kernel_ge(6, 7));
     if (xdp_load_program(p, ep) != SX_OK) {
         xdp_close(io);
         return NULL;
@@ -819,21 +924,36 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
                 p->ts_status = SX_RX_TS_ERR_KERNEL;
                 sx_log(ep, SX_LOG_WARN, "xdp rx timestamp disabled: %s", reason);
             }
-        } else {
-            snprintf(reason, sizeof(reason),
-                     "kernel %d.%d >= 6.7 but this build has no XDP metadata "
-                     "timestamp extractor",
-                     major, minor);
+        } else if (p->ts_load_failed) {
             if (ep->cfg.rx_ts_mode == SX_RX_TS_AUTO) {
                 p->ts_mode = SX_RX_TS_AUTO;
                 p->ts_status = SX_RX_TS_SW_FALLBACK;
-                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp: %s; software fallback",
-                       reason);
+                sx_log(ep, SX_LOG_WARN,
+                       "xdp rx hardware timestamp unavailable on this "
+                       "driver; software fallback");
             } else {
                 p->ts_mode = SX_RX_TS_OFF;
                 p->ts_status = SX_RX_TS_ERR_UNSUPPORTED;
-                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp disabled: %s", reason);
+                sx_log(ep, SX_LOG_WARN,
+                       "xdp rx hardware timestamp disabled: driver/interface "
+                       "does not support XDP metadata timestamp");
             }
+        } else {
+#ifdef SX_XDP_TS_EMBEDDED
+            p->ts_mode = SX_RX_TS_HARDWARE;
+            p->ts_status = SX_RX_TS_HW_OK;
+            p->ts_clock = SX_RX_TS_CLOCK_PHC;
+            sx_log(ep, SX_LOG_INFO,
+                   "xdp rx hardware timestamp enabled (metadata, kernel %d.%d)",
+                   major, minor);
+#else
+            snprintf(reason, sizeof(reason),
+                     "kernel %d.%d >= 6.7 but no XDP metadata blob in this build",
+                     major, minor);
+            p->ts_mode = SX_RX_TS_OFF;
+            p->ts_status = SX_RX_TS_ERR_UNSUPPORTED;
+            sx_log(ep, SX_LOG_WARN, "xdp rx timestamp disabled: %s", reason);
+#endif
         }
     }
     ep->stats.rx_ts_mode = (uint32_t)p->ts_mode;

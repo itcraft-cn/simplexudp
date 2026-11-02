@@ -39,8 +39,10 @@ LDLIBS    += -pthread -lrt
 
 BUILD      := build
 BPF_OBJ    := $(BUILD)/sx_xdp_kern.o
+BPF_TS_OBJ := $(BUILD)/sx_xdp_ts_kern.o
 BPF_ECHO_OBJ := $(BUILD)/xdp_echo_kern.o
 BLOB_C     := $(BUILD)/sx_xdp_kern_blob.c
+BLOB_TS_C  := $(BUILD)/sx_xdp_ts_kern_blob.c
 BPF_CFLAGS := -target bpf -O2 -g -I/usr/include/$(MULTIARCH)
 
 ifeq ($(SX_LOSSY),1)
@@ -51,8 +53,8 @@ ifeq ($(SX_NO_XDP),1)
   CPPFLAGS += -DSX_NO_XDP
   LIB_EXTRA_OBJS :=
 else
-  CPPFLAGS += -DSX_XDP_EMBEDDED
-  LIB_EXTRA_OBJS := $(BUILD)/sx_xdp_kern_blob.o
+  CPPFLAGS += -DSX_XDP_EMBEDDED -DSX_XDP_TS_EMBEDDED
+  LIB_EXTRA_OBJS := $(BUILD)/sx_xdp_kern_blob.o $(BUILD)/sx_xdp_ts_kern_blob.o
   PKG_OK := $(shell pkg-config --exists libbpf libxdp 2>/dev/null && echo yes)
   ifeq ($(PKG_OK),yes)
     CPPFLAGS += $(shell pkg-config --cflags libbpf libxdp)
@@ -96,7 +98,7 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/lib/libsimplexudp.a
 	rm -f $(DESTDIR)$(PREFIX)/lib/libsimplexudp.so
 
-bpf: $(BPF_OBJ)
+bpf: $(BPF_OBJ) $(BPF_TS_OBJ)
 
 # 纯 XDP_TX 反射程序（微基准，独立于 SX 数据面）。
 bpf-echo: $(BPF_ECHO_OBJ)
@@ -108,11 +110,20 @@ $(BPF_ECHO_OBJ): bpf/xdp_echo_kern.c | $(BUILD)
 $(BPF_OBJ): bpf/sx_xdp_kern.c | $(BUILD)
 	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
 
+$(BPF_TS_OBJ): bpf/sx_xdp_ts_kern.c bpf/sx_xdp_meta.h | $(BUILD)
+	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
+
 # 生成内嵌字节数组（const）。使用脚本以兼容旧版 xxd（无 -n 选项）。
 $(BLOB_C): $(BPF_OBJ) scripts/gen_blob.sh
 	sh scripts/gen_blob.sh $(BPF_OBJ) $@ sx_xdp_kern_o
 
 $(BUILD)/sx_xdp_kern_blob.o: $(BLOB_C) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BLOB_TS_C): $(BPF_TS_OBJ) scripts/gen_blob.sh
+	sh scripts/gen_blob.sh $(BPF_TS_OBJ) $@ sx_xdp_ts_kern_o
+
+$(BUILD)/sx_xdp_ts_kern_blob.o: $(BLOB_TS_C) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---- 库 ----

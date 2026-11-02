@@ -436,7 +436,7 @@ cfg.rx_ts_mode = SX_RX_TS_HARDWARE; /* 只接受硬件；不可用则关闭并�
 | 后端 | 行为 |
 | --- | --- |
 | 内核 UDP | `SO_TIMESTAMPING` + `SOF_TIMESTAMPING_RX_HARDWARE | RAW_HARDWARE`，返回 PHC 原始纳秒 |
-| AF_XDP | 启动时探测内核；Linux < 6.7 不支持 XDP RX metadata 时间戳，`HARDWARE` 会关闭并给出原因，`AUTO` 回退用户态软件时间戳 |
+| AF_XDP | 启动时探测内核与驱动；Linux < 6.7 不支持 XDP RX metadata 时间戳；>=6.7 且驱动支持时使用 XDP metadata，驱动不支持则 `HARDWARE` 关闭并给出原因，`AUTO` 回退软件时间戳 |
 
 启动日志和 `sx_stats_t` 会输出：
 
@@ -448,6 +448,9 @@ rx_ts_clock_id 0=CLOCK_REALTIME, 1=PHC
 ```
 
 当前 10.45（5.18）和 10.46（4.18）的 AF_XDP 硬件时间戳都会被判定为 `-2`（内核 < 6.7）；
+本机 6.12 内核上，XDP metadata 程序可以编译，但 `lo`/e1000e 驱动不支持 metadata 时间戳，
+会回退并报告 `-1`（驱动/接口不支持）。支持该能力的网卡上会启用 `HARDWARE`。
+
 UDP 后端在支持硬件时间戳的网卡上可直接获得 PHC 时间。
 
 ### 12.2 使用

@@ -9,8 +9,9 @@
 
 - 接收硬件时间戳：默认关闭，`rx_ts_mode` 显式开启；UDP 后端通过 `SO_TIMESTAMPING`
   返回 PHC 原始时间，`on_recv_ex`/`sx_recv_ex` 透出 `sx_pkt_info_t`。
-- AF_XDP 时间戳能力探测：启动时检测内核，当前 5.18/4.18 给出 `SX_RX_TS_ERR_KERNEL`
-  并回退软件时间戳（`AUTO`）；状态写入日志与 `sx_stats_t`。
+- AF_XDP 时间戳：启动时检测内核；>=6.7 时加载设备绑定的 XDP metadata 程序，
+  通过 `bpf_xdp_adjust_meta` + `bpf_xdp_metadata_rx_timestamp` 读取 RX PHC 时间；
+  内核 <6.7 或驱动不支持时给出原因，`AUTO` 回退软件时间戳。
 - 单播消息自动拆包/重组：新增 `SX_CMD_PUSH_FRAG`、分片头 `msg_id/frag_idx/frag_cnt/total_len`、
   按链路重组缓冲；`max_message` 默认 64KB，硬上限 256KB（`f3f11a2`）。
 - 组播/广播大消息分片：按来源重组，NACK 重传保留 `PUSH_FRAG`；`group_reorder`/`group_history`
