@@ -276,7 +276,7 @@ sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
 #### `int64_t sx_send(sx_endpoint_t *ep, sx_link_t *link, const void *data, size_t len)`
 发送一条消息。返回消息序号（`>=0`），或负错误码：
 
-- `SX_ERR_TOO_LARGE`：`len > sx_max_message(ep)`（单播）；组播/广播仍限制为 `max_payload`；
+- `SX_ERR_TOO_LARGE`：`len > sx_max_message(ep)`；
 - `SX_ERR_WINDOW`：发送窗口已满，需稍后重试；
 - `SX_ERR_CLOSED`：端点未启动或已停止。
 
@@ -334,7 +334,7 @@ void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 | 0 | `SX_OK` | 成功 |
 | -1 | `SX_ERR_INVALID` | 参数非法 |
 | -2 | `SX_ERR_NOMEM` | 内存不足 |
-| -3 | `SX_ERR_TOO_LARGE` | 消息超过 `max_message`，或组播/广播超过 `max_payload` |
+| -3 | `SX_ERR_TOO_LARGE` | 消息超过 `max_message` |
 | -4 | `SX_ERR_NOT_FOUND` | 资源不存在 |
 | -5 | `SX_ERR_EXISTS` | 已存在 |
 | -6 | `SX_ERR_AGAIN` | 暂不可用/无数据 |

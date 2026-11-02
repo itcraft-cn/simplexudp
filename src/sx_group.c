@@ -31,6 +31,7 @@ typedef struct sx_grx {
     sx_msg_t *ring;     /* 长度 = g->reorder（2 的幂） */
     uint64_t last_recv_ms;
     uint64_t last_nack_ms;
+    sx_frag_reasm_t frag;
 } sx_grx_t;
 
 struct sx_group {
@@ -197,6 +198,9 @@ void sx_group_reset(sx_group_t *g) {
     }
     g->snd_nxt = 0;
     g->adv_snd = 0;
+    for (i = 0; i < g->max_src; i++) {
+        sx_frag_reasm_reset(&g->src[i].frag);
+    }
     g->last_adv_ms = 0;
     g->hello_sent = 0;
 }
@@ -218,8 +222,8 @@ void sx_group_destroy(sx_group_t *g) {
 }
 
 /* 发送历史中保留一条消息副本。 */
-static void group_hist_store(sx_group_t *g, uint32_t seq, const void *data,
-                             size_t len) {
+static void group_hist_store(sx_group_t *g, uint32_t seq, uint8_t cmd,
+                             const void *data, size_t len) {
     sx_msg_t *slot = &g->hist[seq & (g->hist_cap - 1u)];
     if (slot->data != NULL) {
         sx_pool_free(&g->ep->pool, slot->data);
@@ -227,6 +231,7 @@ static void group_hist_store(sx_group_t *g, uint32_t seq, const void *data,
     }
     slot->seq = seq;
     slot->len = (uint16_t)len;
+    slot->cmd = cmd;
     slot->flags = SX_MSG_USED;
     if (len > 0) {
         slot->data = (uint8_t *)sx_pool_alloc(&g->ep->pool, len);
@@ -238,7 +243,8 @@ static void group_hist_store(sx_group_t *g, uint32_t seq, const void *data,
     }
 }
 
-int64_t sx_group_send(sx_group_t *g, const void *data, size_t len) {
+static int64_t group_send_cmd(sx_group_t *g, uint8_t cmd, const void *data,
+                              size_t len) {
     uint32_t seq;
     if (g == NULL || (data == NULL && len > 0)) {
         return SX_ERR_INVALID;
@@ -247,13 +253,72 @@ int64_t sx_group_send(sx_group_t *g, const void *data, size_t len) {
         return SX_ERR_TOO_LARGE;
     }
     seq = g->snd_nxt++;
-    group_hist_store(g, seq, data, len);
+    group_hist_store(g, seq, cmd, data, len);
     /* una 此处复用作“高水位/下一序号”，使接收端可侦测尾部丢包。 */
-    sx_group_send_raw(g, SX_CMD_PUSH, seq, g->snd_nxt, 0, NULL, 0, data, len,
+    sx_group_send_raw(g, cmd, seq, g->snd_nxt, 0, NULL, 0, data, len,
                       group_dst_ip(g), group_dst_port(g));
     g->ep->stats.tx_packets++;
     g->ep->stats.tx_bytes += len;
     return (int64_t)seq;
+}
+
+int64_t sx_group_send(sx_group_t *g, const void *data, size_t len) {
+    return group_send_cmd(g, SX_CMD_PUSH, data, len);
+}
+
+int64_t sx_group_send_message(sx_group_t *g, const void *data, size_t len) {
+    size_t frag_payload;
+    uint32_t cnt;
+    uint32_t i;
+    uint32_t first_seq;
+    uint8_t buf[SX_MAX_PAYLOAD_LIMIT];
+    const uint8_t *p = (const uint8_t *)data;
+
+    if (g == NULL || (data == NULL && len > 0)) {
+        return SX_ERR_INVALID;
+    }
+    if (len <= g->ep->cfg.max_payload) {
+        return sx_group_send(g, data, len);
+    }
+    if (g->ep->cfg.max_message == 0 || len > g->ep->cfg.max_message ||
+        g->ep->cfg.max_payload <= SX_FRAG_HDR_SIZE) {
+        return SX_ERR_TOO_LARGE;
+    }
+    frag_payload = g->ep->cfg.max_payload - SX_FRAG_HDR_SIZE;
+    cnt = (uint32_t)((len + frag_payload - 1u) / frag_payload);
+    if (cnt == 0 || cnt > 0xffffu) {
+        return SX_ERR_TOO_LARGE;
+    }
+    first_seq = g->snd_nxt;
+    for (i = 0; i < cnt; i++) {
+        size_t off = (size_t)i * frag_payload;
+        size_t chunk = len - off;
+        uint32_t msg_id = first_seq;
+        uint32_t total = (uint32_t)len;
+        int64_t r;
+        if (chunk > frag_payload) {
+            chunk = frag_payload;
+        }
+        buf[0] = (uint8_t)(msg_id >> 24);
+        buf[1] = (uint8_t)(msg_id >> 16);
+        buf[2] = (uint8_t)(msg_id >> 8);
+        buf[3] = (uint8_t)msg_id;
+        buf[4] = (uint8_t)(i >> 8);
+        buf[5] = (uint8_t)i;
+        buf[6] = (uint8_t)(cnt >> 8);
+        buf[7] = (uint8_t)cnt;
+        buf[8] = (uint8_t)(total >> 24);
+        buf[9] = (uint8_t)(total >> 16);
+        buf[10] = (uint8_t)(total >> 8);
+        buf[11] = (uint8_t)total;
+        memcpy(buf + SX_FRAG_HDR_SIZE, p + off, chunk);
+        r = group_send_cmd(g, SX_CMD_PUSH_FRAG, buf,
+                           SX_FRAG_HDR_SIZE + chunk);
+        if (r < 0) {
+            return r;
+        }
+    }
+    return (int64_t)first_seq;
 }
 
 static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
@@ -267,6 +332,7 @@ static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
         if (!g->src[i].used) {
             sx_grx_t *s = &g->src[i];
             uint32_t r;
+            sx_frag_reasm_reset(&s->frag);
             for (r = 0; r < g->reorder; r++) {
                 sx_pool_free(&g->ep->pool, s->ring[r].data);
                 s->ring[r].data = NULL;
@@ -286,10 +352,29 @@ static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
     return NULL;
 }
 
-static void group_deliver(sx_group_t *g, sx_grx_t *s, sx_msg_t *slot) {
-    sx_ep_deliver(g->ep, g->link, s->ip, s->port, slot->data, slot->len);
+static void group_deliver_payload(sx_group_t *g, sx_grx_t *s, uint8_t cmd,
+                                 const uint8_t *data, size_t len) {
+    if (cmd == SX_CMD_PUSH_FRAG) {
+        const uint8_t *out = NULL;
+        size_t out_len = 0;
+        int r = sx_frag_reasm_input(&s->frag, data, len,
+                                    (uint32_t)g->ep->cfg.max_message, &out,
+                                    &out_len);
+        if (r == 1) {
+            sx_ep_deliver(g->ep, g->link, s->ip, s->port, out, out_len);
+            sx_frag_reasm_reset(&s->frag);
+        } else if (r < 0) {
+            g->ep->stats.dropped++;
+        }
+    } else {
+        sx_ep_deliver(g->ep, g->link, s->ip, s->port, data, len);
+    }
     g->ep->stats.rx_packets++;
-    g->ep->stats.rx_bytes += slot->len;
+    g->ep->stats.rx_bytes += len;
+}
+
+static void group_deliver(sx_group_t *g, sx_grx_t *s, sx_msg_t *slot) {
+    group_deliver_payload(g, s, slot->cmd, slot->data, slot->len);
 }
 
 static void group_drain(sx_group_t *g, sx_grx_t *s) {
@@ -350,9 +435,7 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
     if (seq == s->rcv_nxt) {
         /* 先推进期望序号，再投递（回调内可能立即发送）。 */
         s->rcv_nxt++;
-        sx_ep_deliver(g->ep, g->link, s->ip, s->port, payload, h->payload_len);
-        g->ep->stats.rx_packets++;
-        g->ep->stats.rx_bytes += h->payload_len;
+        group_deliver_payload(g, s, h->cmd, payload, h->payload_len);
         group_drain(g, s);
     } else if (sx_seq_after(seq, s->rcv_nxt) &&
                (seq - s->rcv_nxt) < g->reorder) {
@@ -374,6 +457,7 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
             }
             slot->seq = seq;
             slot->len = (uint16_t)h->payload_len;
+            slot->cmd = h->cmd;
             slot->flags = SX_MSG_USED;
             s->count++;
             g->ep->stats.reorder_pkts++;
@@ -416,6 +500,7 @@ void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
 
     switch (h.cmd) {
     case SX_CMD_PUSH:
+    case SX_CMD_PUSH_FRAG:
         group_input_push(g, s, &h, payload);
         break;
     case SX_CMD_NACK: {
@@ -432,7 +517,7 @@ void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
                 if (slot->seq == m && slot->flags == SX_MSG_USED) {
                     /* 组播/广播：重发到组地址，使所有成员都能恢复；
                      * 已持有的成员按重复包丢弃。 */
-                    sx_group_send_raw(g, SX_CMD_PUSH, m, g->snd_nxt, 0, NULL, 0,
+                    sx_group_send_raw(g, slot->cmd, m, g->snd_nxt, 0, NULL, 0,
                                       slot->data, slot->len, group_dst_ip(g),
                                       group_dst_port(g));
                     g->ep->stats.retransmits++;

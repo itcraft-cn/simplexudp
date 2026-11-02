@@ -370,6 +370,8 @@ sx_group_t *sx_group_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
 void sx_group_destroy(sx_group_t *g);
 void sx_group_reset(sx_group_t *g);
 int64_t sx_group_send(sx_group_t *g, const void *data, size_t len);
+/* 组播/广播发送一条消息；超过 max_payload 时自动分片。 */
+int64_t sx_group_send_message(sx_group_t *g, const void *data, size_t len);
 void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
                     uint32_t src_ip, uint16_t src_port, uint64_t now_ms);
 void sx_group_update(sx_group_t *g, uint64_t now_ms);

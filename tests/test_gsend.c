@@ -45,7 +45,9 @@ int main(int argc, char **argv) {
     uint32_t mcast_if;
     unsigned long count;
     unsigned long interval_us = 0;
+    unsigned long payload_size = 32;
     unsigned long i;
+    unsigned char *buf;
 
     g_log = fopen(logpath != NULL ? logpath : "test_gsend.log", "w");
     if (g_log == NULL) {
@@ -65,6 +67,14 @@ int main(int argc, char **argv) {
     if (argc > 6) {
         interval_us = strtoul(argv[6], NULL, 10);
     }
+    if (argc > 7) {
+        payload_size = strtoul(argv[7], NULL, 10);
+    }
+    if (payload_size < 8 || payload_size > SX_MAX_MESSAGE_LIMIT) {
+        fprintf(g_log, "invalid payload size %lu\n", payload_size);
+        fclose(g_log);
+        return 2;
+    }
 
     sx_config_init(&cfg);
     cfg.backend = SX_BACKEND_UDP;
@@ -74,6 +84,8 @@ int main(int argc, char **argv) {
     cfg.on_log = log_fn;
     cfg.log_level = SX_LOG_WARN;
     cfg.send_window = 1024;
+    cfg.max_message = 256u * 1024u;
+    cfg.group_history = 2048;
 
     ep = sx_create(&cfg);
     if (ep == NULL || sx_start(ep) != SX_OK) {
@@ -90,17 +102,24 @@ int main(int argc, char **argv) {
         fclose(g_log);
         return 1;
     }
-    fprintf(g_log, "send mode=%s if=%s dst=%s:%u count=%lu\n", mode, argv[2],
-            argv[3], port, count);
+    fprintf(g_log, "send mode=%s if=%s dst=%s:%u count=%lu size=%lu\n", mode,
+            argv[2], argv[3], port, count, payload_size);
+    buf = (unsigned char *)malloc(payload_size);
+    if (buf == NULL) {
+        sx_destroy(ep);
+        fclose(g_log);
+        return 1;
+    }
 
     for (i = 0; i < count; i++) {
-        unsigned char buf[32];
         unsigned long seq = i;
+        size_t j;
         int guard = 0;
-        memset(buf, 0, sizeof(buf));
         memcpy(buf, &seq, sizeof(seq));
-        memcpy(buf + sizeof(seq), "SX-GRP", 6);
-        while (sx_send(ep, link, buf, sizeof(buf)) == SX_ERR_WINDOW &&
+        for (j = sizeof(seq); j < payload_size; j++) {
+            buf[j] = (unsigned char)(j * 17u + 3u);
+        }
+        while (sx_send(ep, link, buf, payload_size) == SX_ERR_WINDOW &&
                guard++ < 1000) {
             sx_update(ep, 0);
         }
@@ -116,7 +135,8 @@ int main(int argc, char **argv) {
         sx_update(ep, 0);
         usleep(1000);
     }
-    fprintf(g_log, "send done sent=%lu\n", count);
+    fprintf(g_log, "send done sent=%lu size=%lu\n", count, payload_size);
+    free(buf);
     sx_destroy(ep);
     fclose(g_log);
     return 0;

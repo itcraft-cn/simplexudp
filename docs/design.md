@@ -45,7 +45,7 @@ Ethernet(14) | IPv4(20) | UDP(8) | SX header(32) | payload(<=1400)
 ```
 
 - 不做 IPv4 分片/重组；`payload + SX头 <= MTU-42` 由库在 API 层硬性校验。
-- 单条消息超过 `max_payload` 时，库用 `SX_CMD_PUSH_FRAG` 做应用层分片，接收端按序重组；上限由 `max_message` 控制。
+- 单条消息超过 `max_payload` 时，库用 `SX_CMD_PUSH_FRAG` 做应用层分片，单播/组播/广播接收端均按序重组；上限由 `max_message` 控制。
 - IP 头校验和与 UDP 校验和（含伪首部）在用户态计算，零拷贝时需注意 `XDP_UMEM` 对齐。
 - IPv4 TTL、DSCP、协议号可配置。
 

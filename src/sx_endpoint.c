@@ -408,6 +408,13 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
         if (ep->cfg.recv_window > SX_SEND_WINDOW_LIMIT) {
             ep->cfg.recv_window = SX_SEND_WINDOW_LIMIT;
         }
+        /* 组播/广播的重排窗口与发送历史也要至少覆盖一条最大消息的分片数。 */
+        if (ep->cfg.group_reorder < need) {
+            ep->cfg.group_reorder = need;
+        }
+        if (ep->cfg.group_history < need) {
+            ep->cfg.group_history = need;
+        }
     }
     if (ep->cfg.conv == 0) {
         ep->cfg.conv = SX_DEFAULT_CONV;
@@ -824,12 +831,7 @@ int64_t sx_send(sx_endpoint_t *ep, sx_link_t *link, const void *data,
     if (link->scope == SX_SCOPE_UNICAST) {
         r = sx_kcp_send_message(link->kcp, data, len);
     } else {
-        /* 组播/广播暂不分片：保持 best-effort 单包语义。 */
-        if (len > ep->cfg.max_payload) {
-            pthread_mutex_unlock(&ep->lock);
-            return SX_ERR_TOO_LARGE;
-        }
-        r = sx_group_send(link->group, data, len);
+        r = sx_group_send_message(link->group, data, len);
     }
     pthread_mutex_unlock(&ep->lock);
     return r;

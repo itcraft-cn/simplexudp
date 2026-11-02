@@ -24,6 +24,8 @@ typedef struct ctx {
     unsigned long got;
     unsigned long ooo;
     unsigned long expect;
+    unsigned long bad;
+    unsigned long payload_size;
 } ctx_t;
 
 static uint64_t now_ms(void) {
@@ -44,14 +46,25 @@ static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
                     size_t len, void *user) {
     ctx_t *c = (ctx_t *)user;
     unsigned long seq = 0;
+    const unsigned char *p = (const unsigned char *)data;
+    size_t j;
     (void)ep;
     (void)link;
+    if (len != c->payload_size) {
+        c->bad++;
+    }
     if (len >= sizeof(seq)) {
         memcpy(&seq, data, sizeof(seq));
         if (seq != c->expect) {
             c->ooo++;
         }
         c->expect = seq + 1;
+    }
+    for (j = sizeof(seq); j < len; j++) {
+        if (p[j] != (unsigned char)(j * 17u + 3u)) {
+            c->bad++;
+            break;
+        }
     }
     c->got++;
 }
@@ -76,6 +89,7 @@ int main(int argc, char **argv) {
     uint16_t port;
     unsigned long expect;
     unsigned long timeout_ms;
+    unsigned long payload_size = 32;
     uint64_t t0;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -95,9 +109,15 @@ int main(int argc, char **argv) {
     port = (uint16_t)strtoul(argv[4], NULL, 10);
     expect = strtoul(argv[5], NULL, 10);
     timeout_ms = strtoul(argv[6], NULL, 10);
+    if (argc > 7) {
+        payload_size = strtoul(argv[7], NULL, 10);
+    }
+    ctx.payload_size = payload_size;
 
     sx_config_init(&cfg);
     cfg.backend = SX_BACKEND_UDP;
+    cfg.max_message = 256u * 1024u;
+    cfg.group_reorder = 512;
     cfg.local_ip = 0;
     cfg.multicast_if = mcast_if;
     cfg.local_port = port;
@@ -135,5 +155,5 @@ int main(int argc, char **argv) {
             ctx.ooo);
     sx_destroy(ep);
     fclose(g_log);
-    return (ctx.got == expect) ? 0 : 1;
+    return (ctx.got == expect && ctx.bad == 0) ? 0 : 1;
 }
