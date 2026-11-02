@@ -173,8 +173,11 @@ flowchart LR
 10.45 的 p3p2（mlx5，25G）native XDP 可用，但 `XDP_ZEROCOPY` bind 返回 `EINVAL`，自动回退 copy。
 独立最小 libxdp 探针在队列 0/1、frame size 2048/4096 下均可复现，已排除本库参数问题。后续需确认：
 网卡是否处于 switchdev/representor 模式、固件版本、内核 mlx5 配置、以及是否需要特定的 UMEM 对齐。
-跨机复测发现队列 1 可成功 zero-copy，但业务流量/ARP 仍落队列 0，服务端收不到包；需配合 flow steering。
-验收：zero-copy bind 成功并出现在 `stats.xdp_bind`；否则在文档中明确该平台只能 copy。
+跨机复测确认 5.18.10 mlx5 仍使用“ZC 队列 = combined + 队列号”的偏移规则：combined 2 时队列 2/3
+可 zero-copy；配合 `ethtool -N` 把 UDP 端口 steer 到队列 2、两端静态 ARP，可打通 zero-copy。
+但 n=20000 时 p50 19us、p99 31us，未优于 copy 的 p50 16us、p99 31us，且出现 1ms 级尖刺。
+后续需绑核/IRQ 亲和性复测，确认 ConnectX-4 Lx 的 ZC 是否真有收益。
+验收：zero-copy bind 成功并出现在 `stats.xdp_bind`，且在绑核条件下给出可复现的时延对比。
 
 成本：1~2 人日。风险：中（依赖驱动/固件）。依赖：真实硬件环境。
 
