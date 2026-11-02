@@ -2,6 +2,8 @@
 
 版本：0.1.0　适用平台：Linux x86_64 / aarch64　语言：ANSI C（C99）
 
+[README](README.md) | [变更记录](CHANGELOG.md) | [English](MANUAL_en.md)
+
 本手册是 `include/simplexudp.h` 的完整使用说明，包含概念模型、快速开始、配置详解、
 API 参考、协议与可靠性语义、AF_XDP 说明、调优与常见问题。设计原理见 `docs/design.md`。
 

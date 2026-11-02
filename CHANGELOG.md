@@ -3,6 +3,8 @@
 本文件记录 simple-xudp (SX) 的功能变更、修复与测试文档更新。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+[README](README.md) | [使用手册](MANUAL.md) | [English](CHANGELOG_en.md)
+
 ## [Unreleased] - 2026-11-02
 
 ### Added

@@ -1,6 +1,6 @@
 # simple-xudp (SX)
 
-[变更记录](CHANGELOG.md) | [使用手册](MANUAL.md)
+[变更记录](CHANGELOG.md) | [使用手册](MANUAL.md) | [English](README_en.md)
 
 基于 **XDP + AF_XDP** 的 Linux 底层通讯库（ANSI C），同时提供**内核 UDP socket** 后端作为兼容/测试路径。向上提供消息导向、**有序可靠**、**丢包侦测重发**、支持**点播/组播/广播**的通讯能力。
 
