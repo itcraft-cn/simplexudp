@@ -32,8 +32,9 @@ static uint32_t get_u32(const uint8_t *p) {
 }
 
 int sx_frag_reasm_input(sx_frag_reasm_t *r, const uint8_t *payload, size_t len,
-                        uint32_t max_total, const uint8_t **out,
-                        size_t *out_len) {
+                        uint32_t max_total, const sx_pkt_info_t *info,
+                        const uint8_t **out, size_t *out_len,
+                        sx_pkt_info_t *out_info) {
     uint32_t msg_id;
     uint32_t total;
     uint16_t idx;
@@ -74,6 +75,11 @@ int sx_frag_reasm_input(sx_frag_reasm_t *r, const uint8_t *payload, size_t len,
         r->next_idx = 0;
         r->received = 0;
         r->active = 1;
+        if (info != NULL) {
+            r->info = *info;
+        } else {
+            memset(&r->info, 0, sizeof(r->info));
+        }
     }
     if (idx != r->next_idx || r->received + data_len > r->total_len) {
         sx_frag_reasm_reset(r);
@@ -85,6 +91,9 @@ int sx_frag_reasm_input(sx_frag_reasm_t *r, const uint8_t *payload, size_t len,
     if (r->next_idx == r->frag_cnt && r->received == r->total_len) {
         *out = r->buf;
         *out_len = r->total_len;
+        if (out_info != NULL) {
+            *out_info = r->info;
+        }
         return 1;
     }
     return 0;

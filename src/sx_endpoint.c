@@ -47,6 +47,7 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->pool_blocks = 0;
     cfg->min_rto_ms = 100;
     cfg->max_rto_ms = 5000;
+    cfg->rx_ts_mode = SX_RX_TS_OFF;
     cfg->cc_mode = SX_CC_ON;
     cfg->rto_backoff = 1;
     cfg->keepalive_ms = 10000;
@@ -93,7 +94,7 @@ void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link) {
 static void ep_enqueue(sx_endpoint_t *ep, sx_rx_item_t **head,
                        sx_rx_item_t **tail, size_t *count, sx_link_t *link,
                        uint32_t src_ip, uint16_t src_port, const void *data,
-                       size_t len) {
+                       size_t len, const sx_pkt_info_t *info) {
     sx_rx_item_t *item = (sx_rx_item_t *)calloc(1, sizeof(*item));
     if (item == NULL) {
         return;
@@ -113,6 +114,9 @@ static void ep_enqueue(sx_endpoint_t *ep, sx_rx_item_t **head,
     item->addr.scope = link != NULL ? link->scope : SX_SCOPE_UNICAST;
     if (link != NULL) {
         memcpy(item->addr.mac, link->addr.mac, 6);
+    }
+    if (info != NULL) {
+        item->info = *info;
     }
     item->next = NULL;
     if (*tail != NULL) {
@@ -139,7 +143,10 @@ void sx_ep_flush(sx_endpoint_t *ep) {
 
     while (batch != NULL) {
         sx_rx_item_t *next = batch->next;
-        if (ep->cfg.on_recv != NULL) {
+        if (ep->cfg.on_recv_ex != NULL) {
+            ep->cfg.on_recv_ex(ep, batch->link, batch->data, batch->len,
+                               &batch->info, ep->cfg.user);
+        } else if (ep->cfg.on_recv != NULL) {
             ep->cfg.on_recv(ep, batch->link, batch->data, batch->len,
                             ep->cfg.user);
         }
@@ -149,17 +156,23 @@ void sx_ep_flush(sx_endpoint_t *ep) {
     }
 }
 
-void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
-                   uint16_t src_port, const void *data, size_t len) {
+void sx_ep_deliver_info(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
+                        uint16_t src_port, const void *data, size_t len,
+                        const sx_pkt_info_t *info) {
     /* 回调模式：先入回调队列，由 sx_update 在解锁后统一调用，避免回调持锁。 */
-    if (ep->cfg.on_recv != NULL) {
+    if (ep->cfg.on_recv_ex != NULL || ep->cfg.on_recv != NULL) {
         ep_enqueue(ep, &ep->cb_head, &ep->cb_tail, &ep->cb_count, link, src_ip,
-                   src_port, data, len);
+                   src_port, data, len, info);
         return;
     }
     /* 拉取模式：入拉取队列。 */
     ep_enqueue(ep, &ep->rx_head, &ep->rx_tail, &ep->rx_count, link, src_ip,
-               src_port, data, len);
+               src_port, data, len, info);
+}
+
+void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
+                   uint16_t src_port, const void *data, size_t len) {
+    sx_ep_deliver_info(ep, link, src_ip, src_port, data, len, NULL);
 }
 
 static void link_destroy(sx_link_t *link) {
@@ -245,7 +258,7 @@ static sx_link_t *find_group(sx_endpoint_t *ep, uint32_t conv, int *is_group) {
 /* 处理一条收到的 SX 报文。 */
 static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
                              uint16_t src_port, const uint8_t *seg,
-                             size_t seg_len) {
+                             size_t seg_len, const sx_pkt_info_t *info) {
     sx_hdr_t h;
     sx_link_t *link;
 
@@ -262,8 +275,8 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
         int is_group = 0;
         sx_link_t *g = find_group(ep, h.conv, &is_group);
         if (g != NULL) {
-            sx_group_input(g->group, seg, seg_len, src_ip, src_port,
-                           sx_now_ms());
+            sx_group_input_info(g->group, seg, seg_len, src_ip, src_port,
+                                sx_now_ms(), info);
             return 1;
         }
         sx_log(ep, SX_LOG_DEBUG,
@@ -307,7 +320,7 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
                (src_ip >> 8) & 0xff, src_ip & 0xff, src_port, ep->nlinks);
         return 0;
     }
-    sx_kcp_input(link->kcp, seg, seg_len, sx_now_ms());
+    sx_kcp_input_info(link->kcp, seg, seg_len, sx_now_ms(), info);
     return 1;
 }
 
@@ -321,14 +334,18 @@ static int ep_drain_rx(sx_endpoint_t *ep) {
         uint32_t sip = 0;
         uint16_t sport = 0;
         size_t len = 0;
-        int r = ep->io->recvfrom(ep->io, &sip, &sport, buf, sizeof(buf), &len);
+        sx_pkt_info_t info;
+        int r;
+        memset(&info, 0, sizeof(info));
+        r = ep->io->recvfrom(ep->io, &sip, &sport, buf, sizeof(buf), &len,
+                             &info);
         if (r <= 0) {
             if (r < 0) {
                 sx_log(ep, SX_LOG_WARN, "recvfrom error %d", r);
             }
             break;
         }
-        count += ep_process_packet(ep, sip, sport, buf, len);
+        count += ep_process_packet(ep, sip, sport, buf, len, &info);
     }
     return count;
 }
@@ -545,8 +562,11 @@ int sx_start(sx_endpoint_t *ep) {
     ep_apply_static_arps(ep);
     sx_ep_emit(ep, SX_EVENT_STARTED, NULL);
     sx_ep_emit(ep, SX_EVENT_BACKEND_CHOSEN, NULL);
-    sx_log(ep, SX_LOG_INFO, "started backend=%s local_port=%u",
-           ep->io->name, ep->cfg.local_port);
+    sx_log(ep, SX_LOG_INFO,
+           "started backend=%s local_port=%u rx_ts_mode=%u rx_ts_status=%d "
+           "rx_ts_clock=%u",
+           ep->io->name, ep->cfg.local_port, ep->stats.rx_ts_mode,
+           (int)ep->stats.rx_ts_status, ep->stats.rx_ts_clock_id);
 
     if (ep->cfg.rx_thread) {
         if (pthread_create(&ep->thread, NULL, ep_thread_main, ep) == 0) {
@@ -855,8 +875,9 @@ int64_t sx_send_to(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
     return sx_send(ep, link, data, len);
 }
 
-ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out,
-                sx_link_t **link_out) {
+static ssize_t sx_recv_common(sx_endpoint_t *ep, void *buf, size_t cap,
+                             sx_addr_t *src_out, sx_link_t **link_out,
+                             sx_pkt_info_t *info_out) {
     sx_rx_item_t *item;
     size_t copy;
     if (ep == NULL || buf == NULL) {
@@ -883,6 +904,9 @@ ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out,
     if (link_out != NULL) {
         *link_out = item->link;
     }
+    if (info_out != NULL) {
+        *info_out = item->info;
+    }
     {
         /* 返回完整消息长度：若大于 cap 说明本次被截断，调用方可据此察觉。 */
         ssize_t full = (ssize_t)item->len;
@@ -890,6 +914,17 @@ ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out,
         free(item);
         return full;
     }
+}
+
+ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap, sx_addr_t *src_out,
+                sx_link_t **link_out) {
+    return sx_recv_common(ep, buf, cap, src_out, link_out, NULL);
+}
+
+ssize_t sx_recv_ex(sx_endpoint_t *ep, void *buf, size_t cap,
+                   sx_addr_t *src_out, sx_link_t **link_out,
+                   sx_pkt_info_t *info_out) {
+    return sx_recv_common(ep, buf, cap, src_out, link_out, info_out);
 }
 
 /* ------------------------------------------------------------------ */

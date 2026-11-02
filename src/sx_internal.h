@@ -176,6 +176,7 @@ typedef struct sx_msg {
     uint16_t fastack;   /* 被跨越（快速重传）计数 */
     uint16_t flags;     /* SX_MSG_* */
     uint8_t cmd;        /* 原始命令（PUSH/PUSH_FRAG） */
+    sx_pkt_info_t info; /* 接收时间戳（发送槽不使用） */
     uint64_t xmit_ts;   /* 最近一次发送时间 */
     uint8_t *data;      /* 拥有的净荷 */
 } sx_msg_t;
@@ -202,7 +203,8 @@ struct sx_io {
                   const void *buf, size_t len);
     /* 非阻塞接收。返回 1=收到，0=无数据，<0=错误。 */
     int (*recvfrom)(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
-                    void *buf, size_t cap, size_t *len);
+                    void *buf, size_t cap, size_t *len,
+                    sx_pkt_info_t *info);
     /* 等待可读，超时毫秒；返回 >0 可读，0 超时，<0 错误。 */
     int (*poll)(sx_io_t *io, int timeout_ms);
     /* 加入组播组（仅 UDP 后端实现；XDP 后端返回 SX_ERR_UNSUPPORTED）。 */
@@ -276,13 +278,15 @@ typedef struct sx_frag_reasm {
     uint16_t frag_cnt;
     uint8_t *buf;
     int active;
+    sx_pkt_info_t info; /* 首片的接收时间戳 */
 } sx_frag_reasm_t;
 
 void sx_frag_reasm_reset(sx_frag_reasm_t *r);
 /* 输入一片；返回 1=完整消息（out/out_len 指向内部 buffer），0=继续等待，<0=丢弃。 */
 int sx_frag_reasm_input(sx_frag_reasm_t *r, const uint8_t *payload, size_t len,
-                        uint32_t max_total, const uint8_t **out,
-                        size_t *out_len);
+                        uint32_t max_total, const sx_pkt_info_t *info,
+                        const uint8_t **out, size_t *out_len,
+                        sx_pkt_info_t *out_info);
 
 /* ------------------------------------------------------------------ */
 /* KCP 可靠引擎（sx_kcp.c）                                            */
@@ -355,6 +359,8 @@ int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len);
 /* 收到一个完整 SX 报文（seg 以 SX 头开始，seg_len 为整包长度）。 */
 void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
                   uint64_t now_ms);
+void sx_kcp_input_info(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
+                       uint64_t now_ms, const sx_pkt_info_t *info);
 
 /* 周期驱动：重传、窗口探测、心跳、超时判定。 */
 void sx_kcp_update(sx_kcp_t *k, uint64_t now_ms);
@@ -374,6 +380,9 @@ int64_t sx_group_send(sx_group_t *g, const void *data, size_t len);
 int64_t sx_group_send_message(sx_group_t *g, const void *data, size_t len);
 void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
                     uint32_t src_ip, uint16_t src_port, uint64_t now_ms);
+void sx_group_input_info(sx_group_t *g, const uint8_t *seg, size_t seg_len,
+                         uint32_t src_ip, uint16_t src_port, uint64_t now_ms,
+                         const sx_pkt_info_t *info);
 void sx_group_update(sx_group_t *g, uint64_t now_ms);
 
 /* ------------------------------------------------------------------ */
@@ -401,6 +410,7 @@ typedef struct sx_rx_item {
     sx_addr_t addr;
     size_t len;
     uint8_t *data;
+    sx_pkt_info_t info;
     struct sx_rx_item *next;
 } sx_rx_item_t;
 
@@ -467,6 +477,9 @@ void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link);
 void sx_ep_flush(sx_endpoint_t *ep);
 void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
                    uint16_t src_port, const void *data, size_t len);
+void sx_ep_deliver_info(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
+                        uint16_t src_port, const void *data, size_t len,
+                        const sx_pkt_info_t *info);
 void sx_kcp_send_raw(sx_kcp_t *k, uint8_t cmd, uint32_t seq, uint32_t una,
                      uint32_t wnd, const uint32_t *ack_list, uint32_t ack_count,
                      const void *payload, size_t payload_len);

@@ -20,10 +20,11 @@ API 参考、协议与可靠性语义、AF_XDP 说明、调优与常见问题。
 9. 统计与可观测性
 10. 线格式与可靠性语义
 11. AF_XDP 后端说明与限制
-12. 调优指南
-13. 部署与权限
-14. 常见问题（FAQ）
-15. 示例与测试
+12. 接收硬件时间戳
+13. 调优指南
+14. 部署与权限
+15. 常见问题（FAQ）
+16. 示例与测试
 
 ---
 
@@ -169,6 +170,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
+| `rx_ts_mode` | `SX_RX_TS_OFF` | 接收时间戳模式；默认关闭，需显式开启 |
 | `max_payload` | 1400 | 单包净荷上限；0→1400；超过 1426 会被钳制 |
 | `max_message` | 65536 | 单条消息上限，最大 256KB；超过 `max_payload` 自动分片；设为 `max_payload` 可关闭 |
 | `send_window` | 256 | 发送窗口（消息数）；会自动提升到能容纳 `max_message` 的分片数，硬下限 256，上限 65536 |
@@ -195,6 +197,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `umem_frames` | 4096 | AF_XDP UMEM 帧数 |
 | `frame_size` | 4096 | AF_XDP 单帧大小 |
 | `on_recv` | NULL | 收包回调；NULL 用 `sx_recv` 拉取 |
+| `on_recv_ex` | NULL | 带时间戳的收包回调；设置后优先于 `on_recv` |
 | `on_event` | NULL | 事件回调 |
 | `on_log` | NULL | 日志回调 |
 | `user` | NULL | 回调透传指针 |
@@ -289,6 +292,19 @@ sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
 调用方应据此处理（放大缓冲或丢弃）；无数据返回 `SX_ERR_AGAIN`；`src_out`/`link_out` 可为 NULL。
 仅在使用拉取模式（`on_recv=NULL`）时使用。
 
+#### `ssize_t sx_recv_ex(..., sx_pkt_info_t *info_out)`
+与 `sx_recv` 相同，额外返回接收时间戳；`info_out` 可为 NULL。
+
+```c
+typedef struct sx_pkt_info {
+    uint64_t rx_ns;      /* ns；0 或 valid=0 表示无有效时间戳 */
+    uint32_t ts_mode;    /* SX_RX_TS_OFF/AUTO/HARDWARE */
+    uint32_t ts_status;  /* SX_RX_TS_* 状态/原因 */
+    uint32_t clock_id;   /* SX_RX_TS_CLOCK_REALTIME / SX_RX_TS_CLOCK_PHC */
+    uint32_t valid;
+} sx_pkt_info_t;
+```
+
 ### 7.5 属性与统计
 
 #### `const char *sx_version(void)` / `const char *sx_strerror(int err)`
@@ -317,6 +333,9 @@ sx_add_static_arp(ep, cfg.gateway_ip, gw_mac);
 ```c
 void (*sx_recv_fn)(sx_endpoint_t *ep, sx_link_t *link,
                    const void *data, size_t len, void *user);
+void (*sx_recv_ex_fn)(sx_endpoint_t *ep, sx_link_t *link,
+                      const void *data, size_t len,
+                      const sx_pkt_info_t *info, void *user);
 void (*sx_event_fn)(sx_endpoint_t *ep, sx_event_t event, sx_link_t *link, void *user);
 void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 ```
@@ -356,6 +375,7 @@ void (*sx_log_fn)(sx_log_level_t level, const char *msg, void *user);
 - 可靠性：`retransmits`、`fast_retrans`、`timeouts`、`dup_packets`、`reorder_pkts`、
   `lost_detected`、`nack_sent/nack_recv`、`dropped`、`xdp_rx_backlog`（XDP：UMEM 帧耗尽/RX 积压计数）
 - 窗口/时延：`snd_wnd`、`snd_outstanding`、`per_peer_wnd`、`cwnd`、`rtt_ms`、`rto_ms`
+- 接收时间戳：`rx_ts_mode`、`rx_ts_status`、`rx_ts_clock_id`
 - 拥塞控制：`cc_mode`（实际生效模式）
 - 后端：`backend`、`backend_fallback`（1=AUTO 曾尝试 XDP 并回退 UDP）、`xdp_mode`、`xdp_bind`
 
@@ -402,7 +422,58 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 ---
 
-## 12. 调优指南
+## 12. 接收硬件时间戳
+
+接收时间戳默认关闭，必须显式开启：
+
+```c
+cfg.rx_ts_mode = SX_RX_TS_HARDWARE; /* 只接受硬件；不可用则关闭并给原因 */
+/* 或 cfg.rx_ts_mode = SX_RX_TS_AUTO; 优先硬件，失败回退软件 */
+```
+
+### 12.1 后端差异
+
+| 后端 | 行为 |
+| --- | --- |
+| 内核 UDP | `SO_TIMESTAMPING` + `SOF_TIMESTAMPING_RX_HARDWARE | RAW_HARDWARE`，返回 PHC 原始纳秒 |
+| AF_XDP | 启动时探测内核；Linux < 6.7 不支持 XDP RX metadata 时间戳，`HARDWARE` 会关闭并给出原因，`AUTO` 回退用户态软件时间戳 |
+
+启动日志和 `sx_stats_t` 会输出：
+
+```text
+rx_ts_mode    0=OFF, 1=AUTO(软件回退), 2=HARDWARE
+rx_ts_status  0=禁用, 1=硬件OK, 2=软件回退,
+              -1=不支持, -2=内核版本不足, -3=权限, -4=IO
+rx_ts_clock_id 0=CLOCK_REALTIME, 1=PHC
+```
+
+当前 10.45（5.18）和 10.46（4.18）的 AF_XDP 硬件时间戳都会被判定为 `-2`（内核 < 6.7）；
+UDP 后端在支持硬件时间戳的网卡上可直接获得 PHC 时间。
+
+### 12.2 使用
+
+```c
+static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
+                   const void *data, size_t len,
+                   const sx_pkt_info_t *info, void *user) {
+    if (info->valid && info->clock_id == SX_RX_TS_CLOCK_PHC) {
+        /* info->rx_ns 是网卡 PHC 原始时间 */
+    }
+}
+
+cfg.rx_ts_mode = SX_RX_TS_HARDWARE;
+cfg.on_recv_ex = on_msg;
+```
+
+拉取模式使用 `sx_recv_ex()`。
+
+对于自动分片的大消息，重组后的消息携带**首个分片**的接收时间戳；分片的后续到达时间不逐片暴露。
+
+注意：PHC 时间与 `CLOCK_REALTIME` 是两个时钟域，不能直接混用；跨机比较前需 PTP 同步
+（本项目 45/46 已部署 ptp4l，master_offset 约 -8ns）。单纯 NTP 的亚毫秒偏差不足以做
+微秒级时间戳比较。
+
+## 13. 调优指南
 
 - **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；不做 IP 分片。超大消息由 `max_message` 控制应用层分片。
 - **窗口**：`send_window`/`recv_window` 会按 `ceil(max_message/(max_payload-12))` 自动提升，硬下限 256、上限 65536。
@@ -429,7 +500,7 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 ---
 
-## 13. 部署与权限
+## 14. 部署与权限
 
 - **AF_XDP**：需要 `CAP_BPF`、`CAP_NET_ADMIN`（加载/attach XDP）与足够的内存锁上限；
   传统内核还需 `RLIMIT_MEMLOCK`（`ulimit -l unlimited`）。可用 `setcap` 授予最小能力，
@@ -439,7 +510,7 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 
 ---
 
-## 14. 常见问题（FAQ）
+## 15. 常见问题（FAQ）
 
 **Q：收不到数据？**
 AF_XDP 下检查：(1) 目标流量是否被引导到绑定的 RX 队列；(2) 是否同一二层网段（ARP），
@@ -464,7 +535,7 @@ UDP 后端下检查防火墙与端口绑定。
 
 ---
 
-## 15. 示例与测试
+## 16. 示例与测试
 
 - `examples/sx_p2p.c`：点播请求/回显（两阶段），`make examples && ./build/sx_p2p`。
 - `examples/sx_group.c`：一个发送方 + 两个接收方的组播演示。

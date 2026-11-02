@@ -23,6 +23,7 @@ typedef struct ctx {
     size_t len;
     int bad;
     size_t expect;
+    sx_pkt_info_t info;
 } ctx_t;
 
 static uint64_t now_ms(void) {
@@ -48,13 +49,9 @@ static void log_fn(sx_log_level_t level, const char *msg, void *user) {
     }
 }
 
-static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
-                    size_t len, void *user) {
-    ctx_t *c = (ctx_t *)user;
+static void handle_payload(ctx_t *c, const void *data, size_t len) {
     const unsigned char *p = (const unsigned char *)data;
     size_t i;
-    (void)ep;
-    (void)link;
     c->got++;
     c->len = len;
     if (len != c->expect) {
@@ -67,6 +64,24 @@ static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
             return;
         }
     }
+}
+
+static void on_recv(sx_endpoint_t *ep, sx_link_t *link, const void *data,
+                    size_t len, void *user) {
+    (void)ep;
+    (void)link;
+    handle_payload((ctx_t *)user, data, len);
+}
+
+static void on_recv_ex(sx_endpoint_t *ep, sx_link_t *link, const void *data,
+                       size_t len, const sx_pkt_info_t *info, void *user) {
+    ctx_t *c = (ctx_t *)user;
+    (void)ep;
+    (void)link;
+    if (info != NULL) {
+        c->info = *info;
+    }
+    handle_payload(c, data, len);
 }
 
 static void fill(unsigned char *buf, size_t len) {
@@ -115,7 +130,13 @@ int main(int argc, char **argv) {
     cfg.on_log = log_fn;
 
     if (strcmp(argv[1], "server") == 0) {
+        const char *ts = getenv("SX_RX_TS");
         cfg.on_recv = on_recv;
+        if (ts != NULL) {
+            cfg.rx_ts_mode = (strcmp(ts, "auto") == 0) ? SX_RX_TS_AUTO
+                                                       : SX_RX_TS_HARDWARE;
+            cfg.on_recv_ex = on_recv_ex;
+        }
         cfg.user = &ctx;
     }
 
@@ -137,8 +158,12 @@ int main(int argc, char **argv) {
             usleep(200);
         }
         if (ctx.got > 0) {
-            fprintf(g_log, "server got=%lu len=%zu bad=%d\n", ctx.got,
-                    ctx.len, ctx.bad);
+            fprintf(g_log,
+                    "server got=%lu len=%zu bad=%d ts_mode=%u ts_status=%u "
+                    "ts_valid=%u ts_clock=%u rx_ns=%llu\n",
+                    ctx.got, ctx.len, ctx.bad, ctx.info.ts_mode,
+                    ctx.info.ts_status, ctx.info.valid, ctx.info.clock_id,
+                    (unsigned long long)ctx.info.rx_ns);
             rc = (ctx.got == 1 && ctx.len == size && ctx.bad == 0) ? 0 : 1;
         } else {
             fprintf(g_log, "server timeout\n");

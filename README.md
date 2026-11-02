@@ -11,6 +11,7 @@
 - 组播/广播采用 **高水位 + NACK** 的尽力可靠（best-effort reliable）+ 按序投递。
 - AF_XDP 支持静态 ARP（不可被应答覆盖）与跨网段网关配置。
 - UDP 后端支持 `udp_rcvbuf`/`udp_sndbuf` 缓冲配置；专线可关闭 RTO 指数退避（`rto_backoff=0`）。
+- 接收硬件时间戳默认关闭；`rx_ts_mode` 显式开启，`on_recv_ex`/`sx_recv_ex` 透出 PHC 时间。
 
 ## 架构
 
@@ -73,6 +74,7 @@ make test-xdp-echo   # 纯 XDP_TX 反射的 RTT 发送端
 make test-io-echo    # 统一 IO 抽象：UDP/AF_XDP 发送端 RTT 对比
 make test-hwts       # UDP 硬件时间戳单向测量（需 PTP 同步）
 make unicast-big     # 单播大消息跨机测试工具（server/client）
+make ts-status       # 接收时间戳能力探测（UDP/AF_XDP）
 
 make check           # 运行单元/回环测试（无需 root，UDP 后端）
 make check-xdp       # 需要 root：创建 veth 跑 AF_XDP 端到端测试

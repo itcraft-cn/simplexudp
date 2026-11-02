@@ -105,6 +105,37 @@ typedef enum sx_scope {
     SX_SCOPE_BROADCAST    /* 广播，尽力可靠（NACK 恢复）+ 有序 */
 } sx_scope_t;
 
+/* 接收硬件时间戳模式。默认关闭，必须显式开启。 */
+typedef enum sx_rx_ts_mode {
+    SX_RX_TS_OFF = 0,     /* 不采集时间戳（默认） */
+    SX_RX_TS_AUTO = 1,    /* 优先硬件，失败回退软件时间戳 */
+    SX_RX_TS_HARDWARE = 2 /* 只接受硬件时间戳，不可用则关闭并给出原因 */
+} sx_rx_ts_mode_t;
+
+/* 时间戳状态/失败原因。 */
+typedef enum sx_rx_ts_status {
+    SX_RX_TS_DISABLED = 0,
+    SX_RX_TS_HW_OK = 1,
+    SX_RX_TS_SW_FALLBACK = 2,
+    SX_RX_TS_ERR_UNSUPPORTED = -1,
+    SX_RX_TS_ERR_KERNEL = -2,
+    SX_RX_TS_ERR_PERM = -3,
+    SX_RX_TS_ERR_IO = -4
+} sx_rx_ts_status_t;
+
+/* 时钟域：0=CLOCK_REALTIME，1=网卡 PHC 原始时钟。 */
+#define SX_RX_TS_CLOCK_REALTIME 0u
+#define SX_RX_TS_CLOCK_PHC 1u
+
+/* 单包接收信息。rx_ns 为 0 或 valid=0 表示无有效时间戳。 */
+typedef struct sx_pkt_info {
+    uint64_t rx_ns;
+    uint32_t ts_mode;    /* sx_rx_ts_mode_t 实际模式 */
+    uint32_t ts_status;  /* sx_rx_ts_status_t */
+    uint32_t clock_id;   /* SX_RX_TS_CLOCK_* */
+    uint32_t valid;
+} sx_pkt_info_t;
+
 /* 日志级别。 */
 typedef enum sx_log_level {
     SX_LOG_ERROR = 0,
@@ -157,6 +188,9 @@ typedef struct sx_stats {
     uint32_t cwnd;
     uint32_t rtt_ms;        /* 平滑 RTT */
     uint32_t rto_ms;        /* 当前 RTO */
+    uint32_t rx_ts_mode;    /* 实际接收时间戳模式 */
+    uint32_t rx_ts_status;  /* 启动时探测结果/原因 */
+    uint32_t rx_ts_clock_id;/* 时间戳时钟域 */
     uint32_t cc_mode;       /* 实际拥塞控制模式：sx_cc_mode_t */
     uint32_t rto_backoff;   /* 实际 RTO 退避策略：1=指数退避，0=固定 */
     uint32_t backend;       /* 实际后端：sx_backend_t */
@@ -176,6 +210,11 @@ typedef struct sx_link sx_link_t;
 /* 收到一条按序消息。peer 为来源链路；data 仅在回调期间有效，如需保留请自行拷贝。 */
 typedef void (*sx_recv_fn)(sx_endpoint_t *ep, sx_link_t *link,
                            const void *data, size_t len, void *user);
+
+/* 带时间戳的接收回调；设置后优先于 on_recv。 */
+typedef void (*sx_recv_ex_fn)(sx_endpoint_t *ep, sx_link_t *link,
+                              const void *data, size_t len,
+                              const sx_pkt_info_t *info, void *user);
 
 /* 事件通知。 */
 typedef void (*sx_event_fn)(sx_endpoint_t *ep, sx_event_t event,
@@ -207,6 +246,9 @@ typedef struct sx_config {
     uint16_t local_port;   /* 本地 UDP 端口（主机序） */
     uint32_t conv;         /* 会话/组标识，默认 SX_DEFAULT_CONV */
 
+    /* ---- 接收时间戳 ---- */
+    sx_rx_ts_mode_t rx_ts_mode; /* 默认 SX_RX_TS_OFF；需显式开启 */
+
     /* ---- 协议参数 ---- */
     size_t max_payload;    /* 单包净荷上限，<= 1400 且 < MTU；0 -> 默认 1400 */
     size_t max_message;    /* 单条消息上限；超过 max_payload 时自动分片重组。
@@ -235,6 +277,7 @@ typedef struct sx_config {
 
     /* ---- 回调 ---- */
     sx_recv_fn on_recv;
+    sx_recv_ex_fn on_recv_ex; /* 可选；设置后优先于 on_recv */
     sx_event_fn on_event;
     sx_log_fn on_log;
     void *user;
@@ -318,6 +361,11 @@ int64_t sx_send_to(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
  * 无数据返回 SX_ERR_AGAIN；src_out/link_out 可为 NULL。 */
 ssize_t sx_recv(sx_endpoint_t *ep, void *buf, size_t cap,
                 sx_addr_t *src_out, sx_link_t **link_out);
+
+/* 带接收时间戳的拉取接口；info_out 可为 NULL。 */
+ssize_t sx_recv_ex(sx_endpoint_t *ep, void *buf, size_t cap,
+                   sx_addr_t *src_out, sx_link_t **link_out,
+                   sx_pkt_info_t *info_out);
 
 /* ------------------------------------------------------------------ */
 /* 属性与统计                                                          */

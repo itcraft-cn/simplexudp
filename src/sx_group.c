@@ -353,28 +353,31 @@ static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
 }
 
 static void group_deliver_payload(sx_group_t *g, sx_grx_t *s, uint8_t cmd,
-                                 const uint8_t *data, size_t len) {
+                                 const uint8_t *data, size_t len,
+                                 const sx_pkt_info_t *info) {
     if (cmd == SX_CMD_PUSH_FRAG) {
         const uint8_t *out = NULL;
         size_t out_len = 0;
+        sx_pkt_info_t out_info;
         int r = sx_frag_reasm_input(&s->frag, data, len,
-                                    (uint32_t)g->ep->cfg.max_message, &out,
-                                    &out_len);
+                                    (uint32_t)g->ep->cfg.max_message, info,
+                                    &out, &out_len, &out_info);
         if (r == 1) {
-            sx_ep_deliver(g->ep, g->link, s->ip, s->port, out, out_len);
+            sx_ep_deliver_info(g->ep, g->link, s->ip, s->port, out, out_len,
+                               &out_info);
             sx_frag_reasm_reset(&s->frag);
         } else if (r < 0) {
             g->ep->stats.dropped++;
         }
     } else {
-        sx_ep_deliver(g->ep, g->link, s->ip, s->port, data, len);
+        sx_ep_deliver_info(g->ep, g->link, s->ip, s->port, data, len, info);
     }
     g->ep->stats.rx_packets++;
     g->ep->stats.rx_bytes += len;
 }
 
 static void group_deliver(sx_group_t *g, sx_grx_t *s, sx_msg_t *slot) {
-    group_deliver_payload(g, s, slot->cmd, slot->data, slot->len);
+    group_deliver_payload(g, s, slot->cmd, slot->data, slot->len, &slot->info);
 }
 
 static void group_drain(sx_group_t *g, sx_grx_t *s) {
@@ -428,14 +431,15 @@ static void group_send_nack(sx_group_t *g, sx_grx_t *s) {
 }
 
 static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
-                             const uint8_t *payload) {
+                             const uint8_t *payload,
+                             const sx_pkt_info_t *info) {
     uint32_t mask = g->reorder - 1u;
     uint32_t seq = h->seq;
 
     if (seq == s->rcv_nxt) {
         /* 先推进期望序号，再投递（回调内可能立即发送）。 */
         s->rcv_nxt++;
-        group_deliver_payload(g, s, h->cmd, payload, h->payload_len);
+        group_deliver_payload(g, s, h->cmd, payload, h->payload_len, info);
         group_drain(g, s);
     } else if (sx_seq_after(seq, s->rcv_nxt) &&
                (seq - s->rcv_nxt) < g->reorder) {
@@ -458,6 +462,11 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
             slot->seq = seq;
             slot->len = (uint16_t)h->payload_len;
             slot->cmd = h->cmd;
+            if (info != NULL) {
+                slot->info = *info;
+            } else {
+                memset(&slot->info, 0, sizeof(slot->info));
+            }
             slot->flags = SX_MSG_USED;
             s->count++;
             g->ep->stats.reorder_pkts++;
@@ -472,8 +481,9 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
     }
 }
 
-void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
-                    uint32_t src_ip, uint16_t src_port, uint64_t now_ms) {
+void sx_group_input_info(sx_group_t *g, const uint8_t *seg, size_t seg_len,
+                         uint32_t src_ip, uint16_t src_port, uint64_t now_ms,
+                         const sx_pkt_info_t *info) {
     sx_hdr_t h;
     const uint8_t *list;
     const uint8_t *payload;
@@ -501,7 +511,7 @@ void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
     switch (h.cmd) {
     case SX_CMD_PUSH:
     case SX_CMD_PUSH_FRAG:
-        group_input_push(g, s, &h, payload);
+        group_input_push(g, s, &h, payload, info);
         break;
     case SX_CMD_NACK: {
         /* 重发历史中仍保留的缺失序号。 */
@@ -534,6 +544,11 @@ void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
     default:
         break;
     }
+}
+
+void sx_group_input(sx_group_t *g, const uint8_t *seg, size_t seg_len,
+                    uint32_t src_ip, uint16_t src_port, uint64_t now_ms) {
+    sx_group_input_info(g, seg, seg_len, src_ip, src_port, now_ms, NULL);
 }
 
 void sx_group_update(sx_group_t *g, uint64_t now_ms) {

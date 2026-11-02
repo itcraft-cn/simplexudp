@@ -100,7 +100,7 @@ static int cmp_u64(const void *a, const void *b) {
 static int recv_once(sx_io_t *io, void *buf, size_t cap, size_t *len) {
     uint32_t sip = 0;
     uint16_t sport = 0;
-    return io->recvfrom(io, &sip, &sport, buf, cap, len);
+    return io->recvfrom(io, &sip, &sport, buf, cap, len, NULL);
 }
 
 
@@ -162,7 +162,7 @@ static int do_mirror(int use_xdp, const char *ifname, uint32_t ip,
         uint32_t sip = 0;
         uint16_t sport = 0;
         size_t len = 0;
-        int r = io->recvfrom(io, &sip, &sport, buf, sizeof(buf), &len);
+        int r = io->recvfrom(io, &sip, &sport, buf, sizeof(buf), &len, NULL);
         if (r > 0) {
             (void)io->sendto(io, sip, sport, buf, len);
             got++;

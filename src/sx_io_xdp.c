@@ -44,12 +44,15 @@ int sx_io_xdp_send_frame(sx_io_t *io, const uint8_t *frame, size_t len) {
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/utsname.h>
+#include <time.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -107,6 +110,9 @@ typedef struct sx_xdp_priv {
     uint16_t bind_flags;
     int attached;
     uint32_t outstanding_tx;
+    int ts_mode;
+    int ts_status;
+    int ts_clock;
 } sx_xdp_priv_t;
 
 /* 解析接口 MAC、IPv4 地址与子网掩码。 */
@@ -326,7 +332,8 @@ static int xdp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
 }
 
 static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
-                        void *buf, size_t cap, size_t *len) {
+                        void *buf, size_t cap, size_t *len,
+                        sx_pkt_info_t *info) {
     sx_xdp_priv_t *p;
 
     if (io == NULL || io->priv == NULL) {
@@ -786,6 +793,52 @@ sx_io_t *sx_io_xdp_create(sx_endpoint_t *ep) {
     ep->stats.backend = SX_BACKEND_XDP;
     ep->stats.xdp_bind = (p->bind_flags == XDP_ZEROCOPY) ? SX_XDP_BIND_ZEROCOPY
                                                          : SX_XDP_BIND_COPY;
+    p->ts_mode = SX_RX_TS_OFF;
+    p->ts_status = SX_RX_TS_DISABLED;
+    p->ts_clock = SX_RX_TS_CLOCK_REALTIME;
+    if (ep->cfg.rx_ts_mode != SX_RX_TS_OFF) {
+        struct utsname u;
+        int major = 0;
+        int minor = 0;
+        char reason[96];
+        reason[0] = '\0';
+        if (uname(&u) == 0) {
+            (void)sscanf(u.release, "%d.%d", &major, &minor);
+        }
+        if (major < 6 || (major == 6 && minor < 7)) {
+            snprintf(reason, sizeof(reason),
+                     "kernel %d.%d < 6.7, XDP RX metadata timestamp unavailable",
+                     major, minor);
+            if (ep->cfg.rx_ts_mode == SX_RX_TS_AUTO) {
+                p->ts_mode = SX_RX_TS_AUTO;
+                p->ts_status = SX_RX_TS_SW_FALLBACK;
+                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp: %s; software fallback",
+                       reason);
+            } else {
+                p->ts_mode = SX_RX_TS_OFF;
+                p->ts_status = SX_RX_TS_ERR_KERNEL;
+                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp disabled: %s", reason);
+            }
+        } else {
+            snprintf(reason, sizeof(reason),
+                     "kernel %d.%d >= 6.7 but this build has no XDP metadata "
+                     "timestamp extractor",
+                     major, minor);
+            if (ep->cfg.rx_ts_mode == SX_RX_TS_AUTO) {
+                p->ts_mode = SX_RX_TS_AUTO;
+                p->ts_status = SX_RX_TS_SW_FALLBACK;
+                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp: %s; software fallback",
+                       reason);
+            } else {
+                p->ts_mode = SX_RX_TS_OFF;
+                p->ts_status = SX_RX_TS_ERR_UNSUPPORTED;
+                sx_log(ep, SX_LOG_WARN, "xdp rx timestamp disabled: %s", reason);
+            }
+        }
+    }
+    ep->stats.rx_ts_mode = (uint32_t)p->ts_mode;
+    ep->stats.rx_ts_status = (uint32_t)p->ts_status;
+    ep->stats.rx_ts_clock_id = (uint32_t)p->ts_clock;
     sx_log(ep, SX_LOG_INFO, "xdp backend ready if=%s mac=%02x:%02x:%02x:%02x:%02x:%02x ip=%u.%u.%u.%u mode=%s bind=%s",
            p->ifname, p->local_mac[0], p->local_mac[1], p->local_mac[2],
            p->local_mac[3], p->local_mac[4], p->local_mac[5],

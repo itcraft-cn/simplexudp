@@ -489,30 +489,32 @@ static void kcp_add_ack(sx_kcp_t *k, uint32_t seq) {
 }
 
 static void kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
-                                const uint8_t *data, size_t len) {
+                                const uint8_t *data, size_t len,
+                                const sx_pkt_info_t *info) {
     if (cmd == SX_CMD_PUSH_FRAG) {
         const uint8_t *out = NULL;
         size_t out_len = 0;
+        sx_pkt_info_t out_info;
         int r = sx_frag_reasm_input(&k->frag, data, len,
-                                    (uint32_t)k->ep->cfg.max_message, &out,
-                                    &out_len);
+                                    (uint32_t)k->ep->cfg.max_message, info,
+                                    &out, &out_len, &out_info);
         if (r == 1) {
-            sx_ep_deliver(k->ep, k->link, k->link->addr.ip,
-                          k->link->addr.port, out, out_len);
+            sx_ep_deliver_info(k->ep, k->link, k->link->addr.ip,
+                               k->link->addr.port, out, out_len, &out_info);
             sx_frag_reasm_reset(&k->frag);
         } else if (r < 0) {
             k->ep->stats.dropped++;
         }
     } else {
-        sx_ep_deliver(k->ep, k->link, k->link->addr.ip, k->link->addr.port,
-                      data, len);
+        sx_ep_deliver_info(k->ep, k->link, k->link->addr.ip,
+                           k->link->addr.port, data, len, info);
     }
     k->ep->stats.rx_packets++;
     k->ep->stats.rx_bytes += len;
 }
 
 static void kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
-    kcp_deliver_payload(k, slot->cmd, slot->data, slot->len);
+    kcp_deliver_payload(k, slot->cmd, slot->data, slot->len, &slot->info);
 }
 
 /* 投递按序到达的消息直到空洞。 */
@@ -539,7 +541,7 @@ static void kcp_drain(sx_kcp_t *k) {
 
 /* 处理 PUSH 数据。 */
 static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payload,
-                           uint64_t now) {
+                           uint64_t now, const sx_pkt_info_t *info) {
     uint32_t mask = k->recv_cap - 1u;
     uint32_t seq = h->seq;
 
@@ -547,7 +549,7 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
         /* 先推进 rcv_nxt，再投递：这样回调内若立即发送（如应用回显），
          * 其携带的累积确认 una 才是最新的，不会漏确认当前这条消息。 */
         k->rcv_nxt++;
-        kcp_deliver_payload(k, h->cmd, payload, h->payload_len);
+        kcp_deliver_payload(k, h->cmd, payload, h->payload_len, info);
         kcp_drain(k);
         kcp_add_ack(k, seq);
     } else if (sx_seq_after(seq, k->rcv_nxt) &&
@@ -572,6 +574,11 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
         slot->seq = seq;
         slot->len = (uint16_t)h->payload_len;
         slot->cmd = h->cmd;
+        if (info != NULL) {
+            slot->info = *info;
+        } else {
+            memset(&slot->info, 0, sizeof(slot->info));
+        }
         slot->flags = SX_MSG_USED;
         slot->xmit = 0;
         slot->fastack = 0;
@@ -624,8 +631,8 @@ static int kcp_process_acks(sx_kcp_t *k, const sx_hdr_t *h,
     return new_ack;
 }
 
-void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
-                  uint64_t now_ms) {
+void sx_kcp_input_info(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
+                       uint64_t now_ms, const sx_pkt_info_t *info) {
     sx_hdr_t h;
     const uint8_t *list;
     const uint8_t *payload;
@@ -671,7 +678,7 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     switch (h.cmd) {
     case SX_CMD_PUSH:
     case SX_CMD_PUSH_FRAG:
-        kcp_input_push(k, &h, payload, now_ms);
+        kcp_input_push(k, &h, payload, now_ms, info);
         if (!k->established && h.peer_id != 0) {
             k->established = 1;
             k->up = 1;
@@ -707,6 +714,11 @@ void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     default:
         break;
     }
+}
+
+void sx_kcp_input(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
+                  uint64_t now_ms) {
+    sx_kcp_input_info(k, seg, seg_len, now_ms, NULL);
 }
 
 /* ------------------------------------------------------------------ */

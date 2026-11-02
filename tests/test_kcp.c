@@ -74,8 +74,8 @@ static int fake_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
 }
 
 static int fake_recvfrom(sx_io_t *io, uint32_t *a, uint16_t *b, void *c,
-                         size_t d, size_t *e) {
-    (void)io; (void)a; (void)b; (void)c; (void)d; (void)e;
+                         size_t d, size_t *e, sx_pkt_info_t *info) {
+    (void)io; (void)a; (void)b; (void)c; (void)d; (void)e; (void)info;
     return 0;
 }
 

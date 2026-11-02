@@ -21,15 +21,30 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <linux/net_tstamp.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+#ifndef SOF_TIMESTAMPING_OPT_ID
+#define SOF_TIMESTAMPING_OPT_ID (1 << 7)
+#endif
+
+/* 兼容旧内核头文件：部分 CentOS 7 头文件未定义 scm_timestamping。 */
+struct sx_scm_timestamping {
+    struct timespec ts[3];
+};
 
 typedef struct sx_udp_priv {
     int sock;
+    int ts_mode;   /* 实际模式：SX_RX_TS_* */
+    int ts_status; /* 状态/原因 */
+    int ts_clock;  /* 时钟域 */
+    int ts_hw;     /* 1=套接字已启用硬件时间戳 */
 #ifdef SX_ENABLE_LOSS_INJECT
     uint32_t drop_ppm;
     uint32_t dup_ppm;
@@ -134,13 +149,32 @@ static int udp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
 }
 
 static int udp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
-                        void *buf, size_t cap, size_t *len) {
+                        void *buf, size_t cap, size_t *len,
+                        sx_pkt_info_t *info) {
     sx_udp_priv_t *p = (sx_udp_priv_t *)io->priv;
     struct sockaddr_in sa;
-    socklen_t slen = sizeof(sa);
+    struct iovec iov;
+    struct msghdr msg;
+    char ctrl[512];
     ssize_t n;
 
-    n = recvfrom(p->sock, buf, cap, 0, (struct sockaddr *)&sa, &slen);
+    if (info != NULL) {
+        memset(info, 0, sizeof(*info));
+        info->ts_mode = (uint32_t)p->ts_mode;
+        info->ts_status = (uint32_t)p->ts_status;
+        info->clock_id = (uint32_t)p->ts_clock;
+    }
+    memset(&msg, 0, sizeof(msg));
+    iov.iov_base = buf;
+    iov.iov_len = cap;
+    msg.msg_name = &sa;
+    msg.msg_namelen = sizeof(sa);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrl;
+    msg.msg_controllen = sizeof(ctrl);
+
+    n = recvmsg(p->sock, &msg, 0);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return 0;
@@ -150,6 +184,44 @@ static int udp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
     if (src_ip) *src_ip = ntohl(sa.sin_addr.s_addr);
     if (src_port) *src_port = ntohs(sa.sin_port);
     if (len) *len = (size_t)n;
+    if (info != NULL && p->ts_mode != SX_RX_TS_OFF) {
+        int hw_found = 0;
+        if (p->ts_hw) {
+            struct cmsghdr *cmsg;
+            for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+                 cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+                if (cmsg->cmsg_level == SOL_SOCKET &&
+                    cmsg->cmsg_type == SCM_TIMESTAMPING) {
+                    struct sx_scm_timestamping *t =
+                        (struct sx_scm_timestamping *)CMSG_DATA(cmsg);
+                    if (t->ts[2].tv_sec != 0 || t->ts[2].tv_nsec != 0) {
+                        info->rx_ns = (uint64_t)t->ts[2].tv_sec * 1000000000ull +
+                                      (uint64_t)t->ts[2].tv_nsec;
+                        info->clock_id = SX_RX_TS_CLOCK_PHC;
+                        info->ts_mode = SX_RX_TS_HARDWARE;
+                        info->ts_status = SX_RX_TS_HW_OK;
+                        info->valid = 1;
+                        hw_found = 1;
+                    }
+                }
+            }
+        }
+        if (!hw_found) {
+            struct timespec ts;
+            if (p->ts_mode == SX_RX_TS_HARDWARE) {
+                info->ts_status = SX_RX_TS_ERR_IO;
+                info->valid = 0;
+            } else {
+                clock_gettime(CLOCK_REALTIME, &ts);
+                info->rx_ns = (uint64_t)ts.tv_sec * 1000000000ull +
+                              (uint64_t)ts.tv_nsec;
+                info->clock_id = SX_RX_TS_CLOCK_REALTIME;
+                info->ts_mode = SX_RX_TS_AUTO;
+                info->ts_status = SX_RX_TS_SW_FALLBACK;
+                info->valid = 1;
+            }
+        }
+    }
     return 1;
 }
 
@@ -293,6 +365,42 @@ sx_io_t *sx_io_udp_create(sx_endpoint_t *ep) {
         (void)setsockopt(p->sock, SOL_SOCKET, SO_BINDTODEVICE, ep->cfg.ifname,
                          strlen(ep->cfg.ifname));
     }
+    p->ts_mode = SX_RX_TS_OFF;
+    p->ts_status = SX_RX_TS_DISABLED;
+    p->ts_clock = SX_RX_TS_CLOCK_REALTIME;
+    if (ep->cfg.rx_ts_mode != SX_RX_TS_OFF) {
+        unsigned int ts_flags = SOF_TIMESTAMPING_RX_HARDWARE |
+                                SOF_TIMESTAMPING_RAW_HARDWARE |
+                                SOF_TIMESTAMPING_OPT_CMSG |
+                                SOF_TIMESTAMPING_OPT_ID;
+        int rc = setsockopt(p->sock, SOL_SOCKET, SO_TIMESTAMPING, &ts_flags,
+                            sizeof(ts_flags));
+        if (rc == 0) {
+            p->ts_mode = SX_RX_TS_HARDWARE;
+            p->ts_status = SX_RX_TS_HW_OK;
+            p->ts_clock = SX_RX_TS_CLOCK_PHC;
+            p->ts_hw = 1;
+            sx_log(ep, SX_LOG_INFO, "udp rx hardware timestamp enabled");
+        } else if (ep->cfg.rx_ts_mode == SX_RX_TS_AUTO) {
+            p->ts_mode = SX_RX_TS_AUTO;
+            p->ts_status = SX_RX_TS_SW_FALLBACK;
+            p->ts_clock = SX_RX_TS_CLOCK_REALTIME;
+            sx_log(ep, SX_LOG_WARN,
+                   "udp rx hardware timestamp unavailable (errno=%d), "
+                   "fallback to software",
+                   errno);
+        } else {
+            p->ts_mode = SX_RX_TS_OFF;
+            p->ts_status = SX_RX_TS_ERR_UNSUPPORTED;
+            sx_log(ep, SX_LOG_WARN,
+                   "udp rx hardware timestamp requested but unavailable "
+                   "(errno=%d), disabled",
+                   errno);
+        }
+    }
+    ep->stats.rx_ts_mode = (uint32_t)p->ts_mode;
+    ep->stats.rx_ts_status = (uint32_t)p->ts_status;
+    ep->stats.rx_ts_clock_id = (uint32_t)p->ts_clock;
 
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
