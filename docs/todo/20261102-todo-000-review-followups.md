@@ -138,7 +138,7 @@ flowchart LR
 
 成本：2~3 人日。风险：中（涉及组播状态机）。依赖：P0 完成后再动，避免混入变量。
 
-### P1-2 单核 PPS / 吞吐基线实测
+### P1-2 单核 PPS / 吞吐基线实测（部分完成）
 
 要解决的问题：点评中的“单核 1400 万 PPS”目前没有仓库内证据，不能对外引用。
 
@@ -167,6 +167,15 @@ flowchart LR
 验收：设计文档给出选型结论与失败回退；原型在 veth 上验证两队列各自收包；不改变现有单端点性能。
 
 成本：设计 2~3 人日，原型 5~10 人日。风险：高。依赖：P0-3、P1-2。
+
+### P1-4 Mellanox zero-copy 失败归因
+
+10.45 的 p3p2（mlx5，25G）native XDP 可用，但 `XDP_ZEROCOPY` bind 返回 `EINVAL`，自动回退 copy。
+独立最小 libxdp 探针在队列 0/1、frame size 2048/4096 下均可复现，已排除本库参数问题。后续需确认：
+网卡是否处于 switchdev/representor 模式、固件版本、内核 mlx5 配置、以及是否需要特定的 UMEM 对齐。
+验收：zero-copy bind 成功并出现在 `stats.xdp_bind`；否则在文档中明确该平台只能 copy。
+
+成本：1~2 人日。风险：中（依赖驱动/固件）。依赖：真实硬件环境。
 
 ### P2-1 硬件时间戳（测量增强）
 
@@ -216,6 +225,15 @@ P0-1、P0-2、P0-3 已在本日完成，P1/P2 保持待办。
 
 验证：`make check` 七项通过（新增 `test_arp`、`test_cc`，扩展 `test_loopback`），
 CMake 构建与 `ctest` 七项通过；UDP-only 与含 XDP 两种构建均无警告。
+
+现场补充（2026-11-02，10.45）：
+
+- 修复旧版 `xxd` 不支持 `-n` 导致 BPF blob 为空的问题（`scripts/gen_blob.sh`）；
+- veth AF_XDP 的自动/静态/网关三种模式均双向 1000/1000 通过；
+- BCM5720（tg3）无 native XDP，只能 generic；mlx5 p3p2 native 可用但 zero-copy 返回 `EINVAL`；
+- `SX_CC_OFF` 在无丢包时与时延/吞吐无关，在 2% 丢包下未减少重传，不能无条件宣传为加速项。
+
+详见 `docs/centos7-test-20261102.md`。
 
 ## 8. 验收总口径
 

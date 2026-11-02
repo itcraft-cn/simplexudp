@@ -101,9 +101,9 @@ bpf: $(BPF_OBJ)
 $(BPF_OBJ): bpf/sx_xdp_kern.c | $(BUILD)
 	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
 
-# 生成内嵌字节数组（const）。
-$(BLOB_C): $(BPF_OBJ)
-	xxd -i -n sx_xdp_kern_o $< | sed -e 's/^unsigned char/const unsigned char/' -e 's/^unsigned int/const unsigned int/' > $@
+# 生成内嵌字节数组（const）。使用脚本以兼容旧版 xxd（无 -n 选项）。
+$(BLOB_C): $(BPF_OBJ) scripts/gen_blob.sh
+	sh scripts/gen_blob.sh $(BPF_OBJ) $@ sx_xdp_kern_o
 
 $(BUILD)/sx_xdp_kern_blob.o: $(BLOB_C) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

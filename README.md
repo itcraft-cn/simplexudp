@@ -157,9 +157,9 @@ sx_destroy(ep);
   并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
   流量确实经 XDP 处理（`sx_stats_map` 的 redirect 计数）。
 
-### 实测参考（本机，停等 RTT，n=20000）
+CentOS 7 / 内核 5.18 实机记录见 `docs/centos7-test-20261102.md`（含旧版 xxd 修复、BCM5720 无 native XDP、mlx5 zero-copy 回退）。
 
-单进程（A/B 两端点在同一进程）：
+### 实测参考（本机，停等 RTT，n=20000）单进程（A/B 两端点在同一进程）：
 
 | 路径 | min | avg | p50 | p99 | max |
 | --- | --- | --- | --- | --- | --- |

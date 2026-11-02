@@ -15,9 +15,12 @@
  */
 #include "simplexudp.h"
 
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #define NMSG 1000
@@ -64,6 +67,24 @@ static uint32_t parse_ip(const char *s) {
     return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
 
+/* 查询接口 MAC（用于静态 ARP 测试）。 */
+static int query_mac(const char *ifname, uint8_t mac[6]) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct ifreq ifr;
+    if (s < 0) {
+        return -1;
+    }
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    if (ioctl(s, SIOCGIFHWADDR, &ifr) != 0) {
+        close(s);
+        return -1;
+    }
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    close(s);
+    return 0;
+}
+
 static void pump(sx_endpoint_t *a, sx_endpoint_t *b, int rounds) {
     int i;
     for (i = 0; i < rounds; i++) {
@@ -88,6 +109,10 @@ int main(int argc, char **argv) {
     ctx_t c0;
     uint32_t i;
     const char *logpath = getenv("SX_LOG");
+    const char *static_mode = getenv("SX_STATIC_ARP");
+    uint8_t mac0[6] = {0};
+    uint8_t mac1[6] = {0};
+    int use_gateway;
 
     if (argc < 5) {
         return 2;
@@ -98,6 +123,11 @@ int main(int argc, char **argv) {
     ip1 = parse_ip(argv[4]);
     if (argc > 5) {
         port = (uint16_t)atoi(argv[5]);
+    }
+    use_gateway = (static_mode != NULL && strcmp(static_mode, "gateway") == 0);
+    if (static_mode != NULL &&
+        (query_mac(if0, mac0) != 0 || query_mac(if1, mac1) != 0)) {
+        return 2;
     }
     g_log = fopen(logpath != NULL ? logpath : "test_xdp.log", "w");
     if (g_log == NULL) {
@@ -118,11 +148,19 @@ int main(int argc, char **argv) {
 
     cfg.ifname = if0;
     cfg.local_ip = ip0;
+    if (use_gateway) {
+        cfg.gateway_ip = ip1;
+        cfg.netmask = 0xffffffffu; /* /32：强制走网关分支 */
+    }
     cfg.on_recv = on_recv;
     cfg.user = &c0;
     ep0 = sx_create(&cfg);
     cfg.ifname = if1;
     cfg.local_ip = ip1;
+    if (use_gateway) {
+        cfg.gateway_ip = ip0;
+        cfg.netmask = 0xffffffffu;
+    }
     cfg.user = &c1;
     ep1 = sx_create(&cfg);
 
@@ -137,15 +175,29 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    l0 = sx_add_unicast(ep0, ip1, port);
-    l1 = sx_add_unicast(ep1, ip0, port);
+    if (static_mode != NULL) {
+        /* 覆盖两条 API 路径：ep0 先注册静态映射再建普通链路；ep1 建链时带 MAC。 */
+        if (sx_add_static_arp(ep0, ip1, mac1) != SX_OK ||
+            sx_add_static_arp(ep1, ip0, mac0) != SX_OK) {
+            fprintf(g_log, "add_static_arp failed\n");
+            fclose(g_log);
+            return 1;
+        }
+        l0 = sx_add_unicast(ep0, ip1, port);
+        l1 = sx_add_unicast_mac(ep1, ip0, port, mac0);
+        fprintf(g_log, "static arp mode=%s gateway=%d\n", static_mode,
+                use_gateway);
+    } else {
+        l0 = sx_add_unicast(ep0, ip1, port);
+        l1 = sx_add_unicast(ep1, ip0, port);
+    }
     if (l0 == NULL || l1 == NULL) {
         fprintf(g_log, "add_unicast failed\n");
         fclose(g_log);
         return 1;
     }
 
-    /* 等待 ARP 解析。 */
+    /* 等待 ARP 解析（静态模式下不应产生 ARP）。 */
     pump(ep0, ep1, 500);
 
     fprintf(g_log, "ep0 -> ep1 send %d\n", NMSG);

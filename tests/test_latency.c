@@ -117,6 +117,12 @@ static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
     } else {
         cfg->backend = SX_BACKEND_UDP;
     }
+    {
+        const char *cc = getenv("SX_CC");
+        if (cc != NULL && (cc[0] == '0' || cc[0] == 'o' || cc[0] == 'O')) {
+            cfg->cc_mode = SX_CC_OFF;
+        }
+    }
 }
 
 /* 服务端：创建端点并持续回显，直到收到信号或 run_ms 到期。 */

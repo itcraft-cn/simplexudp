@@ -455,17 +455,26 @@ static int xdp_bind_socket(sx_xdp_priv_t *p, sx_endpoint_t *ep) {
     cfg.bind_flags = preferred;
     ret = xsk_socket__create(&p->xsk, p->ifname, (uint32_t)ep->cfg.xdp_queue,
                              p->umem, &p->rx, &p->tx, &cfg);
-    if (ret != 0 && preferred == XDP_ZEROCOPY &&
-        ep->cfg.xdp_bind == SX_XDP_BIND_AUTO) {
-        /* 自动回退 copy 模式。 */
-        cfg.bind_flags = XDP_COPY;
-        ret = xsk_socket__create(&p->xsk, p->ifname,
-                                 (uint32_t)ep->cfg.xdp_queue, p->umem, &p->rx,
-                                 &p->tx, &cfg);
-        if (ret == 0) {
-            p->bind_flags = XDP_COPY;
+    if (ret != 0) {
+        int bind_errno = errno;
+        if (preferred == XDP_ZEROCOPY) {
+            sx_log(ep, SX_LOG_WARN,
+                   "xdp zero-copy bind failed on %s errno=%d (%s)",
+                   p->ifname, bind_errno, strerror(bind_errno));
         }
-    } else if (ret == 0) {
+        if (preferred == XDP_ZEROCOPY && ep->cfg.xdp_bind == SX_XDP_BIND_AUTO) {
+            /* 自动回退 copy 模式。 */
+            cfg.bind_flags = XDP_COPY;
+            ret = xsk_socket__create(&p->xsk, p->ifname,
+                                     (uint32_t)ep->cfg.xdp_queue, p->umem,
+                                     &p->rx, &p->tx, &cfg);
+            if (ret == 0) {
+                p->bind_flags = XDP_COPY;
+                sx_log(ep, SX_LOG_INFO, "xdp bind fallback to copy on %s",
+                       p->ifname);
+            }
+        }
+    } else {
         p->bind_flags = cfg.bind_flags;
     }
     if (ret != 0) {

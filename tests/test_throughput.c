@@ -81,6 +81,12 @@ static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
     cfg->log_level = SX_LOG_WARN;
     cfg->send_window = 4096;
     cfg->recv_window = 8192;
+    {
+        const char *cc = getenv("SX_CC");
+        if (cc != NULL && (cc[0] == '0' || cc[0] == 'o' || cc[0] == 'O')) {
+            cfg->cc_mode = SX_CC_OFF;
+        }
+    }
 }
 
 static int run_server(int use_xdp, const char *ifname, uint32_t ip,
@@ -110,14 +116,14 @@ static int run_server(int use_xdp, const char *ifname, uint32_t ip,
         (void)sx_get_stats(ep, &st);
         fprintf(g_log,
                 "server rx_msgs=%llu rx_bytes=%llu sec=%.3f MBps=%.2f "
-                "retrans=%llu dup=%llu reorder=%llu dropped=%llu\n",
+                "retrans=%llu dup=%llu reorder=%llu dropped=%llu cc=%u\n",
                 (unsigned long long)g_rx_count,
                 (unsigned long long)g_rx_bytes, sec,
                 sec > 0 ? (double)g_rx_bytes / 1e6 / sec : 0.0,
                 (unsigned long long)st.retransmits,
                 (unsigned long long)st.dup_packets,
                 (unsigned long long)st.reorder_pkts,
-                (unsigned long long)st.dropped);
+                (unsigned long long)st.dropped, st.cc_mode);
     }
     sx_destroy(ep);
     fclose(g_log);
@@ -207,14 +213,15 @@ static int run_client(int use_xdp, const char *ifname, uint32_t lip,
         fprintf(g_log,
                 "client sent=%llu bytes=%llu sec=%.4f MBps=%.2f msgps=%.0f "
                 "outstanding=%u retrans=%llu fast=%llu timeouts=%llu "
-                "dropped=%llu rtt_ms=%u rto=%u\n",
+                "dropped=%llu rtt_ms=%u rto=%u cc=%u\n",
                 (unsigned long long)sent, (unsigned long long)bytes, sec,
                 sec > 0 ? (double)bytes / 1e6 / sec : 0.0,
                 sec > 0 ? (double)sent / sec : 0.0, st.snd_outstanding,
                 (unsigned long long)st.retransmits,
                 (unsigned long long)st.fast_retrans,
                 (unsigned long long)st.timeouts,
-                (unsigned long long)st.dropped, st.rtt_ms, st.rto_ms);
+                (unsigned long long)st.dropped, st.rtt_ms, st.rto_ms,
+                st.cc_mode);
     }
     free(buf);
     sx_destroy(ep);
