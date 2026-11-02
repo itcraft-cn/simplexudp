@@ -402,6 +402,12 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
         if (ep->cfg.recv_window < need) {
             ep->cfg.recv_window = need;
         }
+        if (ep->cfg.send_window > SX_SEND_WINDOW_LIMIT) {
+            ep->cfg.send_window = SX_SEND_WINDOW_LIMIT;
+        }
+        if (ep->cfg.recv_window > SX_SEND_WINDOW_LIMIT) {
+            ep->cfg.recv_window = SX_SEND_WINDOW_LIMIT;
+        }
     }
     if (ep->cfg.conv == 0) {
         ep->cfg.conv = SX_DEFAULT_CONV;
