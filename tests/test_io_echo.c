@@ -53,6 +53,43 @@ static uint32_t parse_ip(const char *s) {
     return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
 
+/* 解析 SX_STATIC_ARP=IP@MAC。 */
+static int parse_static_arp(const char *s, uint32_t *ip, uint8_t mac[6]) {
+    const char *at;
+    char ipbuf[32];
+    unsigned m[6];
+    size_t n;
+
+    if (s == NULL) {
+        return -1;
+    }
+    at = strchr(s, '@');
+    if (at == NULL) {
+        return -1;
+    }
+    n = (size_t)(at - s);
+    if (n == 0 || n >= sizeof(ipbuf)) {
+        return -1;
+    }
+    memcpy(ipbuf, s, n);
+    ipbuf[n] = '\0';
+    *ip = parse_ip(ipbuf);
+    if (*ip == 0) {
+        return -1;
+    }
+    if (sscanf(at + 1, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+               &m[4], &m[5]) != 6) {
+        return -1;
+    }
+    for (n = 0; n < 6; n++) {
+        if (m[n] > 0xff) {
+            return -1;
+        }
+        mac[n] = (uint8_t)m[n];
+    }
+    return 0;
+}
+
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a;
     uint64_t y = *(const uint64_t *)b;
@@ -115,6 +152,22 @@ int main(int argc, char **argv) {
     ep.cfg.local_port = lport;
     ep.cfg.max_payload = 1400;
     ep.cfg.on_log = log_fn;
+    {
+        const char *q = getenv("SX_XDP_QUEUE");
+        const char *b = getenv("SX_XDP_BIND");
+        if (q != NULL) {
+            ep.cfg.xdp_queue = atoi(q);
+        }
+        if (b != NULL) {
+            if (strcmp(b, "zerocopy") == 0 || strcmp(b, "zc") == 0) {
+                ep.cfg.xdp_bind = SX_XDP_BIND_ZEROCOPY;
+            } else if (strcmp(b, "copy") == 0) {
+                ep.cfg.xdp_bind = SX_XDP_BIND_COPY;
+            } else {
+                ep.cfg.xdp_bind = SX_XDP_BIND_AUTO;
+            }
+        }
+    }
 
     if (strcmp(mode, "xdp") == 0 || strcmp(mode, "auto") == 0) {
         if (geteuid() == 0 && ifname != NULL && ifname[0] != '\0') {
@@ -138,11 +191,26 @@ int main(int argc, char **argv) {
         }
     }
 
+    {
+        const char *sa = getenv("SX_STATIC_ARP");
+        uint32_t sip = 0;
+        uint8_t smac[6];
+        if (sa != NULL && io->set_static_arp != NULL &&
+            parse_static_arp(sa, &sip, smac) == 0) {
+            if (io->set_static_arp(io, sip, smac) == SX_OK) {
+                fprintf(g_log, "static arp %u.%u.%u.%u applied\n",
+                        (sip >> 24) & 0xff, (sip >> 16) & 0xff,
+                        (sip >> 8) & 0xff, sip & 0xff);
+            }
+        }
+    }
+
     fprintf(g_log,
-            "io=%s local=%s:%u dst=%u.%u.%u.%u:%u rounds=%u warmup=%u\n",
+            "io=%s local=%s:%u dst=%u.%u.%u.%u:%u rounds=%u warmup=%u "
+            "xdp_bind=%u\n",
             io->name, ifname != NULL ? ifname : "-", ep.cfg.local_port,
             (dip >> 24) & 0xff, (dip >> 16) & 0xff, (dip >> 8) & 0xff,
-            dip & 0xff, dport, rounds, warmup);
+            dip & 0xff, dport, rounds, warmup, ep.stats.xdp_bind);
 
     for (i = 0; i < rounds + warmup; i++) {
         uint64_t seq = i;
