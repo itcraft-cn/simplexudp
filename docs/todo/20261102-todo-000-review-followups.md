@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | R1 | ARP 仅同网段，建议静态写死对端 MAC | 成立，且比点评说的更严重：公共结构体有 `mac` 字段，但发送路径完全不用；内部 `sx_arp_set` 未导出；静态项没有“不可覆盖”标记，ARP 应答会直接改写，起不到防欺骗作用 | `include/simplexudp.h:120`、`src/sx_endpoint.c:112`、`src/sx_io_xdp.c:242`、`src/sx_arp.c:80`、`src/sx_arp.c:171` |
 | R2 | KCP 默认带拥塞控制，建议提供开关 | 成立，当前无开关；但“抛弃了慢启动”不成立，代码明确实现了慢启动与拥塞避免 | `src/sx_kcp.c:228`、`src/sx_kcp.c:358`、`src/sx_kcp.c:636`；配置项见 `include/simplexudp.h:188-201`，无 CC 相关字段 |
-| R3 | AF_XDP 仅单 RX 队列，建议 XSKMAP 多队列分发 | 部分成立。BPF 侧本来就用 `rx_queue_index` 作为 XSKMAP 键，具备多队列雏形；缺的是“同一网卡多端点/多进程共享一个 XDP 程序”的生命周期设计，而且现有文档声称“每队列一个端点/进程”，与实现矛盾 | `bpf/sx_xdp_kern.c:111`、`src/sx_io_xdp.c:425`、`src/sx_io_xdp.c:493`、`docs/manual.md:383`、`docs/design.md:60` |
+| R3 | AF_XDP 仅单 RX 队列，建议 XSKMAP 多队列分发 | 部分成立。BPF 侧本来就用 `rx_queue_index` 作为 XSKMAP 键，具备多队列雏形；缺的是“同一网卡多端点/多进程共享一个 XDP 程序”的生命周期设计，而且现有文档声称“每队列一个端点/进程”，与实现矛盾 | `bpf/sx_xdp_kern.c:111`、`src/sx_io_xdp.c:425`、`src/sx_io_xdp.c:493`、`MANUAL.md`、`docs/design.md:60` |
 | R4 | 建议引入硬件时间戳 | 成立，当前完全没有硬件时间戳路径；但它是“测量能力”，不是数据面能力，且依赖网卡、驱动与内核版本 | `tests/test_latency.c:45`（仅 `CLOCK_MONOTONIC`）、`src/sx_kcp.c:56`（仅毫秒软件时钟） |
 | R5 | “RTO 可设 10ms 甚至更低” | 部分成立。`min_rto_ms` 可配，但库内时钟为毫秒粒度，默认 100ms；亚毫秒 RTO 当前不可表达，也不建议直接使用 | `include/simplexudp.h:198`、`src/sx_kcp.c:277` |
 | R6 | “单核约 1400 万 PPS” | 未验证。仓库内有吞吐测试，但没有“单核 PPS”的实测记录，不能作为对外数据 | `tests/test_throughput.c`、`MEMORY.md` 吞吐记录 |
@@ -40,7 +40,7 @@
 
 `xdp_attach_program` 使用 `XDP_FLAGS_UPDATE_IF_NOEXIST`，同一网卡已存在 XDP 程序时第二次 attach 必然失败；`SX_BACKEND_AUTO` 随后回退到内核 UDP，只有日志和事件能察觉。与此同时：
 
-- `docs/manual.md:383` 写的是“多队列网卡可将不同流 RSS 到不同队列，每队列一个端点/进程”；
+- `MANUAL.md` 写的是“多队列网卡可将不同流 RSS 到不同队列，每队列一个端点/进程”；
 - `MEMORY.md` 的实测记录则明确写过“单网卡同时只能挂一个 XDP 端点”。
 
 两者矛盾。在多进程网关或按队列分流的部署中，这会表现为“部分进程悄悄跑在 UDP 上”，是最难排查的一类性能事故。

@@ -71,7 +71,7 @@
   - 验收：EAGAIN/合并通知处理正确，不丢唤醒。
 
 - [ ] **FFI-013（P2）ring 使用文档与示例（纯 C）**
-  - 验收：`docs/manual.md` 增补 ring 章节；提供一个 C 示例。
+  - 验收：`MANUAL.md` 增补 ring 章节；提供一个 C 示例。
 
 ### C. Python 封装（Cython）
 
