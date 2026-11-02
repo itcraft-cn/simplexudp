@@ -15,6 +15,9 @@
  */
 #include "sx_internal.h"
 
+static void link_ref(sx_link_t *link);
+static void link_unref(sx_link_t *link);
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +52,7 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->max_rto_ms = 5000;
     cfg->rx_ts_mode = SX_RX_TS_OFF;
     cfg->cc_mode = SX_CC_ON;
+    cfg->large_message_burst = 1;
     cfg->rto_backoff = 1;
     cfg->keepalive_ms = 10000;
     cfg->timeout_ms = 30000;
@@ -84,8 +88,47 @@ const char *sx_strerror(int err) {
 /* ------------------------------------------------------------------ */
 
 void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link) {
-    if (ep != NULL && ep->cfg.on_event != NULL) {
-        ep->cfg.on_event(ep, ev, link, ep->cfg.user);
+    sx_event_item_t *it;
+    if (ep == NULL || ep->cfg.on_event == NULL) {
+        return;
+    }
+    it = (sx_event_item_t *)calloc(1, sizeof(*it));
+    if (it == NULL) {
+        return;
+    }
+    it->event = ev;
+    it->link = link;
+    pthread_mutex_lock(&ep->lock);
+    if (link != NULL) {
+        link_ref(link);
+    }
+    if (ep->evt_tail != NULL) {
+        ep->evt_tail->next = it;
+    } else {
+        ep->evt_head = it;
+    }
+    ep->evt_tail = it;
+    pthread_mutex_unlock(&ep->lock);
+}
+
+void sx_ep_flush_events(sx_endpoint_t *ep) {
+    sx_event_item_t *batch;
+    if (ep == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&ep->lock);
+    batch = ep->evt_head;
+    ep->evt_head = NULL;
+    ep->evt_tail = NULL;
+    pthread_mutex_unlock(&ep->lock);
+    while (batch != NULL) {
+        sx_event_item_t *next = batch->next;
+        if (ep->cfg.on_event != NULL) {
+            ep->cfg.on_event(ep, batch->event, batch->link, ep->cfg.user);
+        }
+        link_unref(batch->link);
+        free(batch);
+        batch = next;
     }
 }
 
@@ -117,6 +160,9 @@ static void ep_enqueue(sx_endpoint_t *ep, sx_rx_item_t **head,
     }
     if (info != NULL) {
         item->info = *info;
+    }
+    if (link != NULL) {
+        link_ref(link);
     }
     item->next = NULL;
     if (*tail != NULL) {
@@ -151,6 +197,7 @@ void sx_ep_flush(sx_endpoint_t *ep) {
                             ep->cfg.user);
         }
         sx_pool_free(&ep->pool, batch->data);
+        link_unref(batch->link);
         free(batch);
         batch = next;
     }
@@ -175,6 +222,12 @@ void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
     sx_ep_deliver_info(ep, link, src_ip, src_port, data, len, NULL);
 }
 
+static void link_ref(sx_link_t *link) {
+    if (link != NULL) {
+        (void)__sync_add_and_fetch(&link->refcnt, 1);
+    }
+}
+
 static void link_destroy(sx_link_t *link) {
     if (link == NULL) {
         return;
@@ -188,6 +241,16 @@ static void link_destroy(sx_link_t *link) {
     free(link);
 }
 
+static void link_unref(sx_link_t *link) {
+    if (link == NULL) {
+        return;
+    }
+    /* 引用计数可能被多个 sx_update/flush 线程并发修改。 */
+    if (__sync_sub_and_fetch(&link->refcnt, 1) == 0 && link->heap) {
+        link_destroy(link);
+    }
+}
+
 static sx_link_t *link_new(sx_endpoint_t *ep, const sx_addr_t *addr) {
     sx_link_t *link = (sx_link_t *)calloc(1, sizeof(*link));
     if (link == NULL) {
@@ -198,6 +261,8 @@ static sx_link_t *link_new(sx_endpoint_t *ep, const sx_addr_t *addr) {
     link->scope = addr->scope;
     link->conv = ep->cfg.conv;
     link->used = 1;
+    link->refcnt = 1;
+    link->heap = 1;
     link->created_ms = sx_now_ms();
     return link;
 }
@@ -270,7 +335,13 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
         return 0;
     }
 
-    /* 组播/广播：按 conv 路由到组链路（先于单播查找）。 */
+    /* 先匹配已建立的单播链路，避免组播/单播共用 conv 时把单播报文送进组引擎。 */
+    link = find_unicast(ep, src_ip, src_port);
+    if (link != NULL && link->kcp != NULL) {
+        sx_kcp_input_info(link->kcp, seg, seg_len, sx_now_ms(), info);
+        return 1;
+    }
+    /* 未命中单播时再按 conv 路由到组链路。 */
     if (ep->nmc > 0 || ep->bcast_link != NULL) {
         int is_group = 0;
         sx_link_t *g = find_group(ep, h.conv, &is_group);
@@ -285,7 +356,6 @@ static int ep_process_packet(sx_endpoint_t *ep, uint32_t src_ip,
                (src_ip >> 8) & 0xff, src_ip & 0xff, src_port);
     }
 
-    link = find_unicast(ep, src_ip, src_port);
     if (link == NULL) {
         /* 服务端自动学习：conv 匹配则建立 ephemeral unicast 链路。 */
         if (h.conv == ep->cfg.conv) {
@@ -379,6 +449,9 @@ sx_endpoint_t *sx_create(const sx_config_t *cfg) {
     if (ep == NULL) {
         return NULL;
     }
+    /* 本端 id 种子随机化：进程重启后 peer_id 不与旧会话重复，
+     * 对端才能据此识别会话重建。 */
+    ep->next_local_id = (uint32_t)(sx_now_ms() ^ ((uint64_t)getpid() << 20));
     ep->cfg = *cfg;
     if (ep->cfg.max_payload == 0) {
         ep->cfg.max_payload = SX_MAX_PAYLOAD_DEFAULT;
@@ -544,6 +617,7 @@ static void *ep_thread_main(void *arg) {
 
 int sx_start(sx_endpoint_t *ep) {
     int chosen = SX_BACKEND_UDP;
+    size_t i;
 
     if (ep == NULL) {
         return SX_ERR_INVALID;
@@ -560,8 +634,18 @@ int sx_start(sx_endpoint_t *ep) {
     ep->running = 1;
     ep->stop_flag = 0;
     ep_apply_static_arps(ep);
+    /* start 前添加的组播链路在此时统一入组。 */
+    for (i = 0; i < ep->nmc; i++) {
+        sx_link_t *l = ep->mc_links[i];
+        if (l != NULL && l->scope == SX_SCOPE_MULTICAST &&
+            ep->io->join_multicast != NULL) {
+            (void)ep->io->join_multicast(ep->io, l->addr.ip,
+                                         ep->cfg.multicast_if);
+        }
+    }
     sx_ep_emit(ep, SX_EVENT_STARTED, NULL);
     sx_ep_emit(ep, SX_EVENT_BACKEND_CHOSEN, NULL);
+    sx_ep_flush_events(ep);
     sx_log(ep, SX_LOG_INFO,
            "started backend=%s local_port=%u rx_ts_mode=%u rx_ts_status=%d "
            "rx_ts_clock=%u",
@@ -578,56 +662,75 @@ int sx_start(sx_endpoint_t *ep) {
 
 int sx_stop(sx_endpoint_t *ep) {
     size_t i;
+    size_t nlinks;
+    sx_io_t *io;
+    sx_link_t **links;
+    sx_link_t **mc_links;
+    sx_rx_item_t *rx;
+    sx_rx_item_t *cb;
+    sx_event_item_t *evt;
+
     if (ep == NULL) {
         return SX_ERR_INVALID;
     }
-    /* 幂等：即使未 start（或已 stop）也要释放已登记的链路等资源。 */
-    if (ep->running) {
-        ep->stop_flag = 1;
-        if (ep->thread_started) {
-            pthread_join(ep->thread, NULL);
-            ep->thread_started = 0;
-        }
-        if (ep->io != NULL) {
-            ep->io->close(ep->io);
-            ep->io = NULL;
-        }
+    /* 先通知线程退出，再在端点锁内摘除资源；避免 sx_update 正在使用 io/link。 */
+    ep->stop_flag = 1;
+    if (ep->thread_started) {
+        pthread_join(ep->thread, NULL);
+        ep->thread_started = 0;
     }
-    for (i = 0; i < ep->nlinks; i++) {
-        link_destroy(ep->links[i]);
-    }
-    free(ep->links);
+
+    pthread_mutex_lock(&ep->lock);
+    io = ep->io;
+    ep->io = NULL;
+    links = ep->links;
+    nlinks = ep->nlinks;
     ep->links = NULL;
     ep->nlinks = 0;
     ep->links_cap = 0;
-    free(ep->mc_links);
+    mc_links = ep->mc_links;
     ep->mc_links = NULL;
     ep->nmc = 0;
     ep->bcast_link = NULL;
-    /* 清空拉取队列与回调队列（缓冲经内存池归还）。 */
-    {
-        sx_rx_item_t *it = ep->rx_head;
-        while (it != NULL) {
-            sx_rx_item_t *n = it->next;
-            sx_pool_free(&ep->pool, it->data);
-            free(it);
-            it = n;
-        }
-        ep->rx_head = ep->rx_tail = NULL;
-        ep->rx_count = 0;
-    }
-    {
-        sx_rx_item_t *it = ep->cb_head;
-        while (it != NULL) {
-            sx_rx_item_t *n = it->next;
-            sx_pool_free(&ep->pool, it->data);
-            free(it);
-            it = n;
-        }
-        ep->cb_head = ep->cb_tail = NULL;
-        ep->cb_count = 0;
-    }
+    rx = ep->rx_head;
+    ep->rx_head = ep->rx_tail = NULL;
+    ep->rx_count = 0;
+    cb = ep->cb_head;
+    ep->cb_head = ep->cb_tail = NULL;
+    ep->cb_count = 0;
+    evt = ep->evt_head;
+    ep->evt_head = ep->evt_tail = NULL;
     ep->running = 0;
+    pthread_mutex_unlock(&ep->lock);
+
+    if (io != NULL) {
+        io->close(io);
+    }
+    for (i = 0; i < nlinks; i++) {
+        link_unref(links[i]);
+    }
+    free(links);
+    free(mc_links);
+    while (rx != NULL) {
+        sx_rx_item_t *n = rx->next;
+        sx_pool_free(&ep->pool, rx->data);
+        link_unref(rx->link);
+        free(rx);
+        rx = n;
+    }
+    while (cb != NULL) {
+        sx_rx_item_t *n = cb->next;
+        sx_pool_free(&ep->pool, cb->data);
+        link_unref(cb->link);
+        free(cb);
+        cb = n;
+    }
+    while (evt != NULL) {
+        sx_event_item_t *n = evt->next;
+        link_unref(evt->link);
+        free(evt);
+        evt = n;
+    }
     return SX_OK;
 }
 
@@ -767,6 +870,7 @@ static sx_link_t *add_link_common(sx_endpoint_t *ep, uint32_t ip, uint16_t port,
     sx_ep_emit(ep, SX_EVENT_PEER_ADDED, link);
 out:
     pthread_mutex_unlock(&ep->lock);
+    sx_ep_flush_events(ep);
     return link;
 }
 
@@ -821,7 +925,7 @@ int sx_link_remove(sx_endpoint_t *ep, sx_link_t *link) {
                     break;
                 }
             }
-            link_destroy(link);
+            link_unref(link);
             pthread_mutex_unlock(&ep->lock);
             return SX_OK;
         }
@@ -911,6 +1015,7 @@ static ssize_t sx_recv_common(sx_endpoint_t *ep, void *buf, size_t cap,
         /* 返回完整消息长度：若大于 cap 说明本次被截断，调用方可据此察觉。 */
         ssize_t full = (ssize_t)item->len;
         sx_pool_free(&ep->pool, item->data);
+        link_unref(item->link);
         free(item);
         return full;
     }
@@ -943,6 +1048,10 @@ int sx_update(sx_endpoint_t *ep, uint64_t now_ms) {
 
     /* 统一加锁：允许与应用线程的 sx_send/其它 sx_update 并发。 */
     pthread_mutex_lock(&ep->lock);
+    if (!ep->running || ep->io == NULL) {
+        pthread_mutex_unlock(&ep->lock);
+        return SX_ERR_CLOSED;
+    }
 
     processed = ep_drain_rx(ep);
 
@@ -970,20 +1079,30 @@ int sx_update(sx_endpoint_t *ep, uint64_t now_ms) {
 
     /* 解锁后统一投递回调，避免用户回调在端点锁内执行。 */
     sx_ep_flush(ep);
+    sx_ep_flush_events(ep);
     return processed;
 }
 
 int sx_wait(sx_endpoint_t *ep, int timeout_ms) {
-    if (ep == NULL || ep->io == NULL) {
+    int r;
+    if (ep == NULL) {
         return SX_ERR_INVALID;
     }
+    pthread_mutex_lock(&ep->lock);
+    if (!ep->running || ep->io == NULL) {
+        pthread_mutex_unlock(&ep->lock);
+        return SX_ERR_CLOSED;
+    }
     if (ep->io->poll != NULL) {
-        return ep->io->poll(ep->io, timeout_ms);
+        r = ep->io->poll(ep->io, timeout_ms);
+    } else {
+        if (timeout_ms > 0) {
+            usleep((useconds_t)timeout_ms * 1000u);
+        }
+        r = 0;
     }
-    if (timeout_ms > 0) {
-        usleep((useconds_t)timeout_ms * 1000u);
-    }
-    return 0;
+    pthread_mutex_unlock(&ep->lock);
+    return r;
 }
 
 int sx_run(sx_endpoint_t *ep, int timeout_ms) {

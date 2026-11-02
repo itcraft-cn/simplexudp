@@ -264,6 +264,7 @@ typedef struct sx_config {
     uint32_t min_rto_ms;   /* 最小 RTO，默认 100 */
     uint32_t max_rto_ms;   /* 最大 RTO，默认 5000 */
     sx_cc_mode_t cc_mode;  /* 拥塞控制模式，默认 SX_CC_ON；专线可设 SX_CC_OFF */
+    uint32_t large_message_burst; /* 1=大消息可临时拉满 cwnd（默认 1，兼容 256KB） */
     uint32_t rto_backoff;  /* 1=超时 RTO 指数退避（默认）；0=固定 RTO，仅重传不翻倍 */
     uint32_t keepalive_ms; /* 空闲心跳间隔，默认 10000 */
     uint32_t timeout_ms;   /* 对端超时判定，默认 30000 */

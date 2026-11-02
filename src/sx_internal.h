@@ -126,6 +126,8 @@ typedef struct sx_pool {
     uint32_t nblocks;
     uint32_t nfree;
     uint32_t *free_idx;
+    pthread_mutex_t lock;
+    int lock_ready;
 } sx_pool_t;
 
 int sx_pool_init(sx_pool_t *p, uint32_t bsz, uint32_t nblocks);
@@ -396,6 +398,8 @@ struct sx_link {
     uint32_t conv;       /* 会话/组标识 */
     int index;           /* 在端点链表中的下标 */
     int used;
+    int refcnt;          /* 链路引用计数，保护已入队消息的 link 指针 */
+    int heap;            /* 1=由 link_new 分配，可在 refcnt 归零时释放 */
     uint64_t created_ms;
     sx_kcp_t *kcp;       /* unicast 引擎 */
     sx_group_t *group;   /* multicast/broadcast 引擎 */
@@ -404,6 +408,12 @@ struct sx_link {
 /* ------------------------------------------------------------------ */
 /* 端点                                                                */
 /* ------------------------------------------------------------------ */
+
+typedef struct sx_event_item {
+    sx_event_t event;
+    sx_link_t *link;
+    struct sx_event_item *next;
+} sx_event_item_t;
 
 typedef struct sx_rx_item {
     sx_link_t *link;
@@ -448,6 +458,10 @@ struct sx_endpoint {
     sx_rx_item_t *cb_tail;
     size_t cb_count;
 
+    /* 事件回调队列：锁内入队，解锁后统一调用 on_event。 */
+    sx_event_item_t *evt_head;
+    sx_event_item_t *evt_tail;
+
     /* 热路径内存池。 */
     sx_pool_t pool;
 
@@ -475,6 +489,7 @@ struct sx_endpoint {
 void sx_ep_emit(sx_endpoint_t *ep, sx_event_t ev, sx_link_t *link);
 /* 取出回调队列并在锁外调用 on_recv（供 sx_update 与直接驱动场景使用）。 */
 void sx_ep_flush(sx_endpoint_t *ep);
+void sx_ep_flush_events(sx_endpoint_t *ep);
 void sx_ep_deliver(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,
                    uint16_t src_port, const void *data, size_t len);
 void sx_ep_deliver_info(sx_endpoint_t *ep, sx_link_t *link, uint32_t src_ip,

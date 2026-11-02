@@ -35,10 +35,9 @@ void sx_log(sx_endpoint_t *ep, sx_log_level_t level, const char *fmt, ...) {
     (void)vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
-    /* 序列化日志回调：可能被网络线程与应用线程并发触发。 */
-    pthread_mutex_lock(&ep->log_lock);
+    /* 回调在锁外执行：允许日志回调内再次调用库 API 而不自锁。
+     * 并发日志可能交错，但每条消息在栈缓冲中完整，不会撕裂。 */
     ep->cfg.on_log(level, buf, ep->cfg.user);
-    pthread_mutex_unlock(&ep->log_lock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -50,6 +49,10 @@ int sx_pool_init(sx_pool_t *p, uint32_t bsz, uint32_t nblocks) {
     if (p == NULL || bsz == 0 || nblocks == 0) {
         return -1;
     }
+    if (pthread_mutex_init(&p->lock, NULL) != 0) {
+        return -1;
+    }
+    p->lock_ready = 1;
     p->base = (uint8_t *)malloc((size_t)bsz * nblocks);
     p->free_idx = (uint32_t *)malloc((size_t)sizeof(uint32_t) * nblocks);
     if (p->base == NULL || p->free_idx == NULL) {
@@ -60,6 +63,8 @@ int sx_pool_init(sx_pool_t *p, uint32_t bsz, uint32_t nblocks) {
         p->bsz = 0;
         p->nblocks = 0;
         p->nfree = 0;
+        pthread_mutex_destroy(&p->lock);
+        p->lock_ready = 0;
         return -1;
     }
     p->bsz = bsz;
@@ -75,6 +80,10 @@ void sx_pool_destroy(sx_pool_t *p) {
     if (p == NULL) {
         return;
     }
+    if (p->lock_ready) {
+        pthread_mutex_destroy(&p->lock);
+        p->lock_ready = 0;
+    }
     free(p->base);
     free(p->free_idx);
     p->base = NULL;
@@ -89,9 +98,20 @@ void *sx_pool_alloc(sx_pool_t *p, size_t len) {
     if (len == 0) {
         return NULL;
     }
-    if (p != NULL && p->base != NULL && len <= p->bsz && p->nfree > 0) {
-        idx = p->free_idx[--p->nfree];
-        return p->base + (size_t)idx * p->bsz;
+    if (p != NULL && p->base != NULL) {
+        if (p->lock_ready) {
+            pthread_mutex_lock(&p->lock);
+        }
+        if (len <= p->bsz && p->nfree > 0) {
+            idx = p->free_idx[--p->nfree];
+            if (p->lock_ready) {
+                pthread_mutex_unlock(&p->lock);
+            }
+            return p->base + (size_t)idx * p->bsz;
+        }
+        if (p->lock_ready) {
+            pthread_mutex_unlock(&p->lock);
+        }
     }
     /* 池空或超大：回退系统分配，保证正确性。 */
     return malloc(len);
@@ -104,10 +124,17 @@ void sx_pool_free(sx_pool_t *p, void *ptr) {
     if (p != NULL && p->base != NULL) {
         uint8_t *b = (uint8_t *)ptr;
         size_t total = (size_t)p->bsz * p->nblocks;
-        if (b >= p->base && b < p->base + total) {
+        int in_pool = (b >= p->base && b < p->base + total);
+        if (in_pool) {
             uint32_t idx = (uint32_t)((size_t)(b - p->base) / p->bsz);
+            if (p->lock_ready) {
+                pthread_mutex_lock(&p->lock);
+            }
             if (p->nfree < p->nblocks) {
                 p->free_idx[p->nfree++] = idx;
+            }
+            if (p->lock_ready) {
+                pthread_mutex_unlock(&p->lock);
             }
             return;
         }
