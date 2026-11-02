@@ -41,6 +41,7 @@ static uint64_t g_t0_ns;
 static uint64_t g_rtt_ns;
 static volatile uint64_t g_echo_count;
 static volatile uint64_t g_echo_fail;
+static int g_busy_poll;
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -223,7 +224,9 @@ static int run_server(int use_xdp, const char *ifname, uint32_t ip,
         end = now_ns() + (uint64_t)run_ms * 1000000ull;
     }
     while (!g_stop && (end == 0 || now_ns() < end)) {
-        (void)sx_wait(ep, 100);
+        if (!g_busy_poll) {
+            (void)sx_wait(ep, 100);
+        }
         (void)sx_update(ep, 0);
         total++;
     }
@@ -285,12 +288,16 @@ static int run_client(int use_xdp, const char *ifname, uint32_t lip,
         for (guard = 0; sx_send(ep, link, &seq, sizeof(seq)) < 0 &&
                        guard < 100000 && !g_stop;
              guard++) {
-            (void)sx_wait(ep, 20);
+            if (!g_busy_poll) {
+                (void)sx_wait(ep, 20);
+            }
             (void)sx_update(ep, 0);
         }
         g_t0_ns = now_ns(); /* 仅在真正发送成功后开始计往返 */
         for (guard = 0; guard < 100000000 && !g_reply && !g_stop; guard++) {
-            (void)sx_wait(ep, 200);
+            if (!g_busy_poll) {
+                (void)sx_wait(ep, 200);
+            }
             (void)sx_update(ep, 0);
         }
         if (!g_reply && !g_stop) {
@@ -508,6 +515,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     mode = argv[1];
+    g_busy_poll = getenv("SX_BUSY_POLL") != NULL;
     g_log = fopen(logpath != NULL ? logpath : "test_latency.log", "w");
     if (g_log == NULL) {
         return 2;
