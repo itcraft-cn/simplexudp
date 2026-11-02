@@ -123,6 +123,12 @@ static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
             cfg->cc_mode = SX_CC_OFF;
         }
     }
+    {
+        const char *q = getenv("SX_XDP_QUEUE");
+        if (q != NULL) {
+            cfg->xdp_queue = atoi(q);
+        }
+    }
 }
 
 /* 服务端：创建端点并持续回显，直到收到信号或 run_ms 到期。 */

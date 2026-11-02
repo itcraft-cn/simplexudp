@@ -186,7 +186,8 @@ typedef struct sx_config {
     sx_backend_t backend;  /* 默认 SX_BACKEND_AUTO */
     sx_xdp_mode_t xdp_mode;
     sx_xdp_bind_t xdp_bind;
-    int xdp_queue;         /* 绑定的 RX 队列，默认 0 */
+    int xdp_queue;         /* 绑定的 RX 队列，默认 0；mlx5 上 queue 0 可能不支持
+                            * zero-copy，可尝试 1 */
 
     /* ---- 本地标识 ---- */
     uint32_t local_ip;     /* 本机 IP（主机序）；0 表示不指定 */

@@ -173,6 +173,7 @@ flowchart LR
 10.45 的 p3p2（mlx5，25G）native XDP 可用，但 `XDP_ZEROCOPY` bind 返回 `EINVAL`，自动回退 copy。
 独立最小 libxdp 探针在队列 0/1、frame size 2048/4096 下均可复现，已排除本库参数问题。后续需确认：
 网卡是否处于 switchdev/representor 模式、固件版本、内核 mlx5 配置、以及是否需要特定的 UMEM 对齐。
+跨机复测发现队列 1 可成功 zero-copy，但业务流量/ARP 仍落队列 0，服务端收不到包；需配合 flow steering。
 验收：zero-copy bind 成功并出现在 `stats.xdp_bind`；否则在文档中明确该平台只能 copy。
 
 成本：1~2 人日。风险：中（依赖驱动/固件）。依赖：真实硬件环境。
@@ -234,6 +235,16 @@ CMake 构建与 `ctest` 七项通过；UDP-only 与含 XDP 两种构建均无警
 - `SX_CC_OFF` 在无丢包时与时延/吞吐无关，在 2% 丢包下未减少重传，不能无条件宣传为加速项。
 
 详见 `docs/centos7-test-20261102.md`。
+
+跨机补充（2026-11-02，10.45/10.46 25G）：
+
+- AF_XDP native+copy 跨机 p50 16~21us、p99 31~38us；同链路 UDP p50 19us、p99 37us；
+- 吞吐：UDP 312 MB/s 但重传 3333；AF_XDP 251 MB/s、重传 16、服务端 dup=0；
+- 发现 SIGKILL 残留 XDP 时 `bpf_xdp_attach` 静默返回 0，已改为 attach 前查询、
+  attach 后校验 program id，并给出明确错误；
+- zero-copy 仍受队列/RSS 限制，未作为可用配置。
+
+详见 `docs/cross-host-45-46-20261102.md`。
 
 ## 8. 验收总口径
 

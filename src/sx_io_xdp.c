@@ -521,6 +521,21 @@ static int xdp_attach_program(sx_xdp_priv_t *p, sx_endpoint_t *ep,
     int nmodes = 0;
     int i;
     int last_errno = 0;
+    __u32 existing = 0;
+
+    /* 先检查是否已有 XDP 程序。部分 libbpf/内核组合下 bpf_xdp_attach 在
+     * EEXIST 时仍返回 0（静默 no-op），必须显式探测，避免假装 attach 成功。 */
+    if (bpf_xdp_query_id(p->ifindex, XDP_FLAGS_DRV_MODE, &existing) == 0 &&
+        existing == 0) {
+        (void)bpf_xdp_query_id(p->ifindex, XDP_FLAGS_SKB_MODE, &existing);
+    }
+    if (existing != 0) {
+        sx_log(ep, SX_LOG_ERROR,
+               "xdp attach refused on %s: program id %u already attached "
+               "(one XDP endpoint per interface; unload it first)",
+               p->ifname, existing);
+        return SX_ERR_BACKEND;
+    }
 
     if (ep->cfg.xdp_mode == SX_XDP_MODE_NATIVE) {
         modes[nmodes++] = XDP_FLAGS_DRV_MODE;
@@ -532,7 +547,10 @@ static int xdp_attach_program(sx_xdp_priv_t *p, sx_endpoint_t *ep,
     }
     for (i = 0; i < nmodes; i++) {
         unsigned int flags = modes[i] | XDP_FLAGS_UPDATE_IF_NOEXIST;
-        if (bpf_xdp_attach(p->ifindex, bpf_program__fd(prog), flags, NULL) == 0) {
+        __u32 attached_id = 0;
+        if (bpf_xdp_attach(p->ifindex, bpf_program__fd(prog), flags, NULL) == 0 &&
+            bpf_xdp_query_id(p->ifindex, modes[i], &attached_id) == 0 &&
+            attached_id != 0) {
             p->attach_flags = modes[i];
             p->attached = 1;
             ep->stats.xdp_mode = (modes[i] == XDP_FLAGS_SKB_MODE)
