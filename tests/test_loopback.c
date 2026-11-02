@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
         size_t maxm = sx_max_message(cli);
         uint8_t *huge = (uint8_t *)malloc(maxm + 1);
         uint8_t big[4000];
-        size_t i;
+        size_t j;
         T_CHECK(maxm >= sizeof(big), "max_message covers 4000");
         T_CHECK(huge != NULL, "huge alloc");
         if (huge != NULL) {
@@ -199,12 +199,12 @@ int main(int argc, char **argv) {
                     "oversize message rejected");
             free(huge);
         }
-        for (i = 0; i < sizeof(big); i++) {
-            big[i] = (uint8_t)(i * 17u + 3u);
+        for (j = 0; j < sizeof(big); j++) {
+            big[j] = (uint8_t)(j * 17u + 3u);
         }
         T_CHECK(sx_send(cli, cl, big, sizeof(big)) >= 0,
                 "fragmented send accepted");
-        for (i = 0; i < 4000 && sctx.big_len == 0; i++) {
+        for (j = 0; j < 4000 && sctx.big_len == 0; j++) {
             pump(srv, cli, 1);
         }
         T_CHECK(sctx.big_len == sizeof(big), "fragmented message reassembled");
@@ -214,13 +214,13 @@ int main(int argc, char **argv) {
     {
         size_t big_len = 200u * 1024u;
         uint8_t *big = (uint8_t *)malloc(big_len);
-        size_t i;
+        size_t j;
         sctx.big_len = 0;
         sctx.big_ok = 0;
         T_CHECK(big != NULL, "200KB alloc");
         if (big != NULL) {
-            for (i = 0; i < big_len; i++) {
-                big[i] = (uint8_t)(i * 17u + 3u);
+            for (j = 0; j < big_len; j++) {
+                big[j] = (uint8_t)(j * 17u + 3u);
             }
             T_CHECK(sx_send(cli, cl, big, big_len) >= 0,
                     "200KB fragmented send accepted");

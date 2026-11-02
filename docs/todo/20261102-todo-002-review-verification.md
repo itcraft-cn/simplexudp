@@ -96,3 +96,49 @@
 3. 会话重同步策略：对端重启时重置接收窗口，还是要求应用重建链路？
 4. 自动学习默认是否关闭/仅白名单？决定 P1-5 的默认行为。
 
+
+## 6. 实施状态（2026-11-02）
+
+批次 A/B/C/D 已按顺序落地；验证记录见本节。
+
+### 已修复
+
+| 项 | 实现要点 |
+| --- | --- |
+| P0-1 内存池并发 | `sx_pool_t` 内嵌互斥锁，`alloc/free/destroy` 全程加锁；池空回退 malloc 的路径不变。 |
+| P0-2 `sx_stop` 并发 | 先置 `stop_flag`、join 内部线程，再持 `ep->lock` 摘除 io/links/队列，解锁后释放；`sx_update`/`sx_wait` 检查 `running`。 |
+| P0-3 单行声明 | `src/sx_io_xdp.c` 拆分为独立声明。 |
+| P1-1 路由歧义 | 先匹配单播链路（ip+port），未命中再按 conv 找组链路。 |
+| P1-2 会话重同步 | 端点随机 `next_local_id`；KCP 比较 `HELLO` 前后的 `peer_id`，变化即重置并重新握手；组播来源空洞超过重排窗口时快进。 |
+| P1-3 链路生命周期 | `sx_link_t.refcnt` 以 `__sync_*` 原子增减；入队消息/事件持引用，移除只减引用。 |
+| P1-4 事件回调 | `on_event` 入事件队列，`sx_update`/`sx_add_*`/`sx_start` 解锁后 flush。 |
+| P1-6 分片回滚 | 单播与组播均新增 `*_cancel_from`，发送失败回滚 `snd_nxt`/历史槽位。 |
+| P1-7 重组失败 | `kcp_deliver_payload` 返回状态；失败时不推进 `rcv_nxt`、不加 ACK。 |
+| P1-8 cwnd 策略 | 新增 `large_message_burst`（默认 1 保持兼容，设 0 严格慢启动）。 |
+| P1-9 构建门禁 | CMake 嵌入 TS BPF blob 并定义 `SX_XDP_TS_EMBEDDED`；修复 `Makefile` 默认目标被 `.d` 覆盖导致增量构建不更新库的问题；`ctest` 覆盖 8 个单测。 |
+| P2-2 start 前组播 | `sx_start` 对已登记组播链路统一 `join_multicast`。 |
+| P2-3 XDP TX | 先分配 frame 再 reserve，reserve 失败释放 frame。 |
+| P2-5 死字段/chatter | `adv_snd` 参与判断，`WINS` 仅高水位变化或长周期广播；`probe_wait/probe_cnt` 未再声明。 |
+| P2-6 ARP 死分支 | 合并为 `local_ip != 0 && tpa == local_ip`。 |
+| P2-7 `on_log` 持锁 | 回调移到 `log_lock` 外。 |
+| P2-9 组播 frag | 来源超时调用 `sx_frag_reasm_reset`。 |
+| P2-10 `-Wshadow` | 测试内层变量改名。 |
+
+### 未修复/保留
+
+| 项 | 原因 |
+| --- | --- |
+| P1-5 自动学习认证/限速 | 涉及安全策略与兼容性，保留 TODO；现有 `max_peers` 可限制数量。 |
+| P2-4 `snd_wnd` 上限语义 | 需先决定 `send_window` 是硬上限还是软目标。 |
+| P2-8 统计口径 | 属可观测性口径调整，未改变行为。 |
+| P2 AF_XDP 硬件时间戳实机数据路径 | 本机/45/46 内核或驱动不支持 XDP metadata 时间戳，无法端到端验证。 |
+
+### 跨机验证（10.45 / 10.46）
+
+- `make check`：本机 8/8、10.45 8/8。
+- `cmake --build` + `ctest`：本机 8/8。
+- AF_XDP veth 端到端：10.45 `test_xdp` PASS（copy 模式）。
+- 单播 256KB：3/3 通过（内容与长度校验）。
+- 组播小消息（5×32B）：10/10 通过。
+- 组播 256KB：3/3 通过；广播 256KB：3/3 通过（发送端 linger 8s 以响应 NACK）。
+- 对端重启重同步：10.46 服务端重启后，10.45 客户端检测到新 `peer_id` 并恢复发送，新服务端收到 17 条后续消息。

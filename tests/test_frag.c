@@ -124,6 +124,7 @@ int main(int argc, char **argv) {
 
     epA.cfg.max_payload = 1400;
     epA.cfg.max_message = 256u * 1024u;
+    epA.cfg.large_message_burst = 1;
     epA.cfg.min_rto_ms = 20;
     epA.cfg.max_rto_ms = 500;
     epA.cfg.send_window = 256;

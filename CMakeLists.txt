@@ -18,7 +18,7 @@ endif()
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 
-add_compile_definitions(_GNU_SOURCE SX_XDP_EMBEDDED)
+add_compile_definitions(_GNU_SOURCE SX_XDP_EMBEDDED SX_XDP_TS_EMBEDDED)
 
 pkg_check_modules(LIBBPF REQUIRED libbpf)
 pkg_check_modules(LIBXDP REQUIRED libxdp)
@@ -46,6 +46,24 @@ add_custom_command(
     COMMENT "生成内嵌 BPF 字节数组")
 set_source_files_properties(${BLOB_C} PROPERTIES GENERATED TRUE)
 
+set(BPF_TS_OBJ ${CMAKE_BINARY_DIR}/sx_xdp_ts_kern.o)
+add_custom_command(
+    OUTPUT ${BPF_TS_OBJ}
+    COMMAND ${BPF_CLANG} -target bpf -O2 -g -I/usr/include/${MULTIARCH} -c
+            ${CMAKE_SOURCE_DIR}/bpf/sx_xdp_ts_kern.c -o ${BPF_TS_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/bpf/sx_xdp_ts_kern.c
+            ${CMAKE_SOURCE_DIR}/bpf/sx_xdp_meta.h
+    COMMENT "编译 XDP 时间戳 BPF 目标 sx_xdp_ts_kern.o")
+
+set(BLOB_TS_C ${CMAKE_BINARY_DIR}/sx_xdp_ts_kern_blob.c)
+add_custom_command(
+    OUTPUT ${BLOB_TS_C}
+    COMMAND sh ${CMAKE_SOURCE_DIR}/scripts/gen_blob.sh ${BPF_TS_OBJ}
+            ${BLOB_TS_C} sx_xdp_ts_kern_o
+    DEPENDS ${BPF_TS_OBJ}
+    COMMENT "生成 XDP 时间戳内嵌字节数组")
+set_source_files_properties(${BLOB_TS_C} PROPERTIES GENERATED TRUE)
+
 set(SX_SOURCES
     src/sx_util.c
     src/sx_proto.c
@@ -57,7 +75,8 @@ set(SX_SOURCES
     src/sx_io_udp.c
     src/sx_io_xdp.c
     src/sx_endpoint.c
-    ${BLOB_C})
+    ${BLOB_C}
+    ${BLOB_TS_C})
 
 add_library(simplexudp STATIC ${SX_SOURCES})
 add_library(simplexudp_shared SHARED ${SX_SOURCES})

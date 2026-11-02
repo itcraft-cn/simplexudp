@@ -1,8 +1,10 @@
 /*
  * test_gsend.c - 组播/广播发送端（跨主机测试用）
  *
- * 用法：test_gsend <mcast|bcast> <mcast_if_ip|0> <dst_ip> <port> <count> [interval_us]
+ * 用法：test_gsend <mcast|bcast> <mcast_if_ip|0> <dst_ip> <port> <count>
+ *                  [interval_us] [payload_size] [linger_ms]
  *   mcast_if_ip 为组播出口接口地址（多网卡必需），0 表示默认。
+ *   linger_ms 为发送后继续处理 NACK/重传的时间，大消息组播测试需 > 0。
  * 行为：以 UDP 后端建立组播/广播链路，发送 count 个带序号的小报文。
  * 日志写入文件（默认 test_gsend.log，可用 SX_LOG 覆盖），不使用标准输出。
  */
@@ -46,6 +48,7 @@ int main(int argc, char **argv) {
     unsigned long count;
     unsigned long interval_us = 0;
     unsigned long payload_size = 32;
+    unsigned long linger_ms = 200;
     unsigned long i;
     unsigned char *buf;
 
@@ -55,7 +58,8 @@ int main(int argc, char **argv) {
     }
     if (argc < 6) {
         fprintf(g_log, "usage: %s <mcast|bcast> <mcast_if_ip|0> <dst_ip> "
-                       "<port> <count> [interval_us]\n", argv[0]);
+                       "<port> <count> [interval_us] [payload_size] "
+                       "[linger_ms]\n", argv[0]);
         fclose(g_log);
         return 2;
     }
@@ -69,6 +73,9 @@ int main(int argc, char **argv) {
     }
     if (argc > 7) {
         payload_size = strtoul(argv[7], NULL, 10);
+    }
+    if (argc > 8) {
+        linger_ms = strtoul(argv[8], NULL, 10);
     }
     if (payload_size < 8 || payload_size > SX_MAX_MESSAGE_LIMIT) {
         fprintf(g_log, "invalid payload size %lu\n", payload_size);
@@ -130,12 +137,13 @@ int main(int argc, char **argv) {
             usleep((useconds_t)interval_us);
         }
     }
-    /* 给底层一点时间发出。 */
-    for (i = 0; i < 50; i++) {
+    /* 发送后继续处理一段时间，使对端 NACK 能触发重传（大消息组播必需）。 */
+    for (i = 0; i < linger_ms; i++) {
         sx_update(ep, 0);
         usleep(1000);
     }
-    fprintf(g_log, "send done sent=%lu size=%lu\n", count, payload_size);
+    fprintf(g_log, "send done sent=%lu size=%lu linger=%lu\n", count,
+            payload_size, linger_ms);
     free(buf);
     sx_destroy(ep);
     fclose(g_log);

@@ -64,6 +64,10 @@ else
   endif
 endif
 
+# 显式指定默认目标：下面的 -include $(DEPS) 会先引入 .d 文件，
+# 若首个目标出现在 .d 中，make 会把默认目标误判成某个 .o。
+.DEFAULT_GOAL := all
+
 LIB_SRCS   := $(wildcard src/*.c)
 LIB_OBJS   := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRCS)) $(LIB_EXTRA_OBJS)
 

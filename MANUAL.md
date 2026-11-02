@@ -135,8 +135,10 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
   库内部锁为递归锁，允许在回调中直接调用 `sx_send`。
 
 线程安全：`sx_send`/`sx_update`/`sx_recv`/链路增删/`sx_get_stats` 内部均由端点锁（递归锁）保护，
-多个应用线程可并发调用；回调内可安全调用 `sx_send`。注意 `sx_link_t*` 句柄在 `sx_link_remove`
-之后失效，移除时勿与其他线程正在使用的同一句柄并发。
+多个应用线程可并发调用；回调内可安全调用 `sx_send`。`on_recv`/`on_event` 均在端点锁外投递，
+回调内可安全调用 `sx_link_remove`/`sx_stop`。`sx_stop` 可在另一线程调用：先置停止标志并回收
+内部线程，再持锁摘除 io/链路/队列。注意 `sx_link_t*` 句柄在 `sx_link_remove` 之后失效，移除时
+勿与其他线程正在使用的同一句柄并发；已排队消息持有链路引用，不会因移除变成悬垂指针。
 
 ---
 
@@ -187,6 +189,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `min_rto_ms` | 100 | 最小重传超时 |
 | `max_rto_ms` | 5000 | 最大重传超时 |
 | `cc_mode` | `SX_CC_ON` | `SX_CC_OFF` 关闭拥塞窗口调节，仅保留 RTO 退避/重传 |
+| `large_message_burst` | 1 | 大消息分片数超过 cwnd 时是否临时拉满；设 0 可保持严格慢启动 |
 | `rto_backoff` | 1 | 1=超时 RTO 指数退避；0=固定 RTO（专线，需谨慎） |
 | `keepalive_ms` | 10000 | 空闲心跳间隔 |
 | `timeout_ms` | 30000 | 对端无响应判定为 DOWN 的阈值 |
@@ -403,6 +406,10 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
   `cc_mode=SX_CC_OFF` 时窗口固定为 `send_window`，RTO 退避与重传保持不变。
 - **组播/广播**：尽力可靠 + 有序。发送端保留 `group_history` 条历史并周期广播高水位；
   接收端按来源侦测空洞后回送 `NACK`，发送端从历史重发到组地址。不保证送达。
+- **会话重同步**：每个端点实例生成随机 `peer_id`。已建链的对端重启后，其 `HELLO` 携带的
+  `peer_id` 与旧值不同，本端自动重置发送/接收窗口并重新握手；组播晚加入或来源超时后，
+  若空洞超过整个重排窗口则快进到当前序号。重同步会丢弃重启前未确认的发送数据。
+- **重组失败**：分片重组失败（内存不足/格式错误）时不推进 `rcv_nxt`、不发送 ACK，避免静默丢消息。
 
 ---
 

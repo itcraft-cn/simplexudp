@@ -37,6 +37,19 @@
 
 ### Fixed
 
+- 并发与生命周期：内存池 `alloc/free` 加锁；`sx_stop` 先停线程再持锁摘除 io/链路/队列；
+  `sx_update`/`sx_wait` 检查运行状态；链路引用计数保护已入队消息；`on_event` 改为锁外队列投递；
+  `sx_log` 回调移出锁外，避免日志回调自锁。
+- 协议正确性：单播优先于组播路由，修复同一端点混用单播/组播时单播数据被送入组引擎；
+  分片重组失败不再推进 `rcv_nxt`/不回 ACK；分片发送中途失败回滚已入窗分片；
+  对端重启通过随机 `peer_id` 识别并重同步；组播晚加入/超时后按重排窗口快进。
+- 组播：`WINS` 仅在高水位变化或长周期时广播，减少空闲 chatter；来源超时重置重组缓冲；
+  `test_gsend` 支持发送后 linger，便于大消息 NACK 重传。
+- 构建：`Makefile` 显式 `.DEFAULT_GOAL := all`，修复 `-include *.d` 导致默认目标变成单个 `.o`、
+  后续增量构建不更新库的问题；CMake 嵌入硬件时间戳 BPF blob 并启用 `SX_XDP_TS_EMBEDDED`。
+- XDP：TX 先分配 frame 再 reserve，失败时释放 frame；ARP 应答条件去重。
+- 测试：清理 `test_loopback` 的 `-Wshadow` 告警；`test_frag` 显式开启 `large_message_burst`。
+- 配置：新增大消息拥塞策略 `large_message_burst`（默认 1，保持 256KB 兼容；设 0 走严格慢启动）。
 - 旧版 `xxd` 不支持 `-n` 导致 BPF blob 为空；`scripts/gen_blob.sh` 改为可移植生成并校验非空（`27f73f8`）。
 - 残留 XDP 程序导致 `bpf_xdp_attach` 静默 no-op；attach 前查询、attach 后校验 program id，
   失败时明确报错（`b1479cd`）。
