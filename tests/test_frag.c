@@ -12,7 +12,7 @@
 #include "sx_test.h"
 
 #define CONV 0x51f2a7u
-#define BIG_LEN 20000u
+#define BIG_LEN 200000u
 #define QCAP 4096
 
 typedef struct fake_pkt {
@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
     memset(&ctx, 0, sizeof(ctx));
 
     epA.cfg.max_payload = 1400;
-    epA.cfg.max_message = 64u * 1024u;
+    epA.cfg.max_message = 256u * 1024u;
     epA.cfg.min_rto_ms = 20;
     epA.cfg.max_rto_ms = 500;
     epA.cfg.send_window = 256;

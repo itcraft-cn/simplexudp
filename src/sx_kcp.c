@@ -304,6 +304,12 @@ int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len) {
     if (cnt == 0 || cnt > 0xffffu) {
         return SX_ERR_TOO_LARGE;
     }
+    /* 大消息要求所有分片一次入窗。默认慢启动 cwnd 从 16 起步，会直接卡住
+     * 256KB 级消息；在专线/大消息场景下把 cwnd 提升到当前发送窗口，
+     * 仅对这条大消息生效，后续仍按 CC 逻辑增长/回退。 */
+    if (k->cc_enabled && cnt > k->cwnd && cnt <= k->snd_wnd) {
+        k->cwnd = k->snd_wnd;
+    }
     window = SX_MIN(k->snd_wnd, k->cwnd);
     if (k->snd_count + cnt > window) {
         return SX_ERR_WINDOW;

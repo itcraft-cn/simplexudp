@@ -407,6 +407,8 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 - **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；不做 IP 分片。超大消息由 `max_message` 控制应用层分片。
 - **窗口**：`send_window`/`recv_window` 会按 `ceil(max_message/(max_payload-12))` 自动提升，硬下限 256、上限 65536。
   这样 256KB 消息在默认 1400B 分片下（189 片）可以一次放入窗口。
+  如果分片数超过当前 `cwnd`，首条大消息会把 `cwnd` 临时提升到 `snd_wnd`，避免慢启动导致
+  `SX_ERR_WINDOW`；后续仍按 CC 逻辑增长/回退。
 - **窗口**：`send_window`/`recv_window` 影响吞吐与内存；高 BDP 链路可增大。
 - **RTO**：局域网可减小 `min_rto_ms`（如 20~50）；跨广域网保持 100+。
 - **RTO 退避**：默认指数退避；专线可在确认链路无拥塞、仅有随机丢包时设 `rto_backoff=0`，
