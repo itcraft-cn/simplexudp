@@ -280,6 +280,22 @@ int64_t sx_kcp_send(sx_kcp_t *k, const void *data, size_t len) {
     return kcp_send_cmd(k, SX_CMD_PUSH, data, len);
 }
 
+static void kcp_cancel_from(sx_kcp_t *k, uint32_t first_seq) {
+    while (k->snd_nxt != first_seq) {
+        sx_msg_t *slot;
+        k->snd_nxt--;
+        slot = &k->snd_buf[k->snd_nxt & (k->send_cap - 1u)];
+        if (slot->data != NULL) {
+            sx_pool_free(&k->ep->pool, slot->data);
+            slot->data = NULL;
+        }
+        memset(slot, 0, sizeof(*slot));
+        if (k->snd_count > 0) {
+            k->snd_count--;
+        }
+    }
+}
+
 int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len) {
     size_t frag_payload;
     uint32_t cnt;
@@ -307,7 +323,8 @@ int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len) {
     /* 大消息要求所有分片一次入窗。默认慢启动 cwnd 从 16 起步，会直接卡住
      * 256KB 级消息；在专线/大消息场景下把 cwnd 提升到当前发送窗口，
      * 仅对这条大消息生效，后续仍按 CC 逻辑增长/回退。 */
-    if (k->cc_enabled && cnt > k->cwnd && cnt <= k->snd_wnd) {
+    if (k->cc_enabled && k->ep->cfg.large_message_burst &&
+        cnt > k->cwnd && cnt <= k->snd_wnd) {
         k->cwnd = k->snd_wnd;
     }
     window = SX_MIN(k->snd_wnd, k->cwnd);
@@ -341,6 +358,7 @@ int64_t sx_kcp_send_message(sx_kcp_t *k, const void *data, size_t len) {
         r = kcp_send_cmd(k, SX_CMD_PUSH_FRAG, buf,
                          SX_FRAG_HDR_SIZE + chunk);
         if (r < 0) {
+            kcp_cancel_from(k, first_seq);
             return r;
         }
     }
@@ -488,9 +506,9 @@ static void kcp_add_ack(sx_kcp_t *k, uint32_t seq) {
     k->ack_pending = 1;
 }
 
-static void kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
-                                const uint8_t *data, size_t len,
-                                const sx_pkt_info_t *info) {
+static int kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
+                               const uint8_t *data, size_t len,
+                               const sx_pkt_info_t *info) {
     if (cmd == SX_CMD_PUSH_FRAG) {
         const uint8_t *out = NULL;
         size_t out_len = 0;
@@ -504,6 +522,7 @@ static void kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
             sx_frag_reasm_reset(&k->frag);
         } else if (r < 0) {
             k->ep->stats.dropped++;
+            return -1;
         }
     } else {
         sx_ep_deliver_info(k->ep, k->link, k->link->addr.ip,
@@ -511,10 +530,12 @@ static void kcp_deliver_payload(sx_kcp_t *k, uint8_t cmd,
     }
     k->ep->stats.rx_packets++;
     k->ep->stats.rx_bytes += len;
+    return 0;
 }
 
-static void kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
-    kcp_deliver_payload(k, slot->cmd, slot->data, slot->len, &slot->info);
+static int kcp_deliver(sx_kcp_t *k, sx_msg_t *slot) {
+    return kcp_deliver_payload(k, slot->cmd, slot->data, slot->len,
+                               &slot->info);
 }
 
 /* 投递按序到达的消息直到空洞。 */
@@ -526,7 +547,9 @@ static void kcp_drain(sx_kcp_t *k) {
         if (slot->seq != k->rcv_nxt || slot->flags != SX_MSG_USED) {
             break;
         }
-        kcp_deliver(k, slot);
+        if (kcp_deliver(k, slot) < 0) {
+            break;
+        }
         sx_pool_free(&k->ep->pool, slot->data);
         slot->data = NULL;
         slot->flags = SX_MSG_FREE;
@@ -548,8 +571,10 @@ static void kcp_input_push(sx_kcp_t *k, const sx_hdr_t *h, const uint8_t *payloa
     if (seq == k->rcv_nxt) {
         /* 先推进 rcv_nxt，再投递：这样回调内若立即发送（如应用回显），
          * 其携带的累积确认 una 才是最新的，不会漏确认当前这条消息。 */
+        if (kcp_deliver_payload(k, h->cmd, payload, h->payload_len, info) < 0) {
+            return;
+        }
         k->rcv_nxt++;
-        kcp_deliver_payload(k, h->cmd, payload, h->payload_len, info);
         kcp_drain(k);
         kcp_add_ack(k, seq);
     } else if (sx_seq_after(seq, k->rcv_nxt) &&
@@ -636,6 +661,7 @@ void sx_kcp_input_info(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     sx_hdr_t h;
     const uint8_t *list;
     const uint8_t *payload;
+    uint32_t prev_remote_id;
     int new_ack = 0;
 
     if (k == NULL || seg == NULL) {
@@ -649,6 +675,8 @@ void sx_kcp_input_info(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
     if (h.conv != k->conv) {
         return; /* 非本会话 */
     }
+    /* 记录更新前的对端 id，用于 HELLO 分支识别对端重启。 */
+    prev_remote_id = k->remote_id;
     if (h.peer_id != 0 && h.peer_id != k->remote_id) {
         k->remote_id = h.peer_id;
     }
@@ -686,6 +714,21 @@ void sx_kcp_input_info(sx_kcp_t *k, const uint8_t *seg, size_t seg_len,
         }
         break;
     case SX_CMD_HELLO:
+        /* 对端重启/重建会话：HELLO 携带的 peer_id 与旧值不同时重置。 */
+        if (k->established && h.peer_id != 0 && prev_remote_id != 0 &&
+            h.peer_id != prev_remote_id) {
+            sx_log(k->ep, SX_LOG_WARN,
+                   "kcp peer restart detected (peer_id=%u rcv_nxt=%u)",
+                   h.peer_id, k->rcv_nxt);
+            sx_kcp_reset(k);
+            k->remote_id = h.peer_id;
+            k->established = 1;
+            k->up = 1;
+            /* 重置后重新发 HELLO，促使对端也重建会话。 */
+            k->hello_sent = 0;
+            sx_ep_emit(k->ep, SX_EVENT_PEER_UP, k->link);
+            break;
+        }
         /* 仅在未建链时回一次 HELLO，避免双方互答造成风暴。 */
         if (!k->established) {
             k->established = 1;

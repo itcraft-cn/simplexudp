@@ -266,6 +266,19 @@ int64_t sx_group_send(sx_group_t *g, const void *data, size_t len) {
     return group_send_cmd(g, SX_CMD_PUSH, data, len);
 }
 
+static void group_cancel_from(sx_group_t *g, uint32_t first_seq) {
+    while (g->snd_nxt != first_seq) {
+        sx_msg_t *slot;
+        g->snd_nxt--;
+        slot = &g->hist[g->snd_nxt & (g->hist_cap - 1u)];
+        if (slot->data != NULL) {
+            sx_pool_free(&g->ep->pool, slot->data);
+            slot->data = NULL;
+        }
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
 int64_t sx_group_send_message(sx_group_t *g, const void *data, size_t len) {
     size_t frag_payload;
     uint32_t cnt;
@@ -315,6 +328,7 @@ int64_t sx_group_send_message(sx_group_t *g, const void *data, size_t len) {
         r = group_send_cmd(g, SX_CMD_PUSH_FRAG, buf,
                            SX_FRAG_HDR_SIZE + chunk);
         if (r < 0) {
+            group_cancel_from(g, first_seq);
             return r;
         }
     }
@@ -346,6 +360,9 @@ static sx_grx_t *group_src_find(sx_group_t *g, uint32_t ip, uint16_t port) {
             s->count = 0;
             s->last_nack_ms = 0;
             s->last_recv_ms = sx_now_ms();
+            sx_log(g->ep, SX_LOG_DEBUG,
+                   "group new source %u.%u.%u.%u:%u slot=%u", (ip >> 24) & 0xff,
+                   (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff, port, i);
             return s;
         }
     }
@@ -436,6 +453,17 @@ static void group_input_push(sx_group_t *g, sx_grx_t *s, const sx_hdr_t *h,
     uint32_t mask = g->reorder - 1u;
     uint32_t seq = h->seq;
 
+    /* 晚加入的组播成员从当前序号开始；若空洞已超过整个重排窗口且本地无缓存，
+     * 快进到当前序号，避免永远等不到历史包。 */
+    if (seq != s->rcv_nxt && s->count == 0 &&
+        sx_seq_after(seq, s->rcv_nxt) &&
+        (seq - s->rcv_nxt) >= g->reorder) {
+        sx_log(g->ep, SX_LOG_INFO,
+               "group source %u.%u.%u.%u:%u fast-forward %u -> %u",
+               (s->ip >> 24) & 0xff, (s->ip >> 16) & 0xff,
+               (s->ip >> 8) & 0xff, s->ip & 0xff, s->port, s->rcv_nxt, seq);
+        s->rcv_nxt = seq;
+    }
     if (seq == s->rcv_nxt) {
         /* 先推进期望序号，再投递（回调内可能立即发送）。 */
         s->rcv_nxt++;
@@ -575,6 +603,7 @@ void sx_group_update(sx_group_t *g, uint64_t now_ms) {
             s->rcv_nxt = 0;
             s->peer_max = 0;
             s->count = 0;
+            sx_frag_reasm_reset(&s->frag);
             continue;
         }
         /* 只要期望序号落后于对端高水位（含尾部丢包），就请求重发。 */
@@ -585,7 +614,9 @@ void sx_group_update(sx_group_t *g, uint64_t now_ms) {
     }
     /* 周期性广播高水位（使接收端侦测尾部丢包）。周期由 20ms 放宽到
      * SX_GROUP_ADV_MS，降低 chatter，同时保证末尾高水位可被重复通告。 */
-    if (g->snd_nxt > 0 && now_ms - g->last_adv_ms >= SX_GROUP_ADV_MS) {
+    if (g->snd_nxt > 0 &&
+        (g->adv_snd != g->snd_nxt ||
+         now_ms - g->last_adv_ms >= 5u * SX_GROUP_ADV_MS)) {
         sx_group_send_raw(g, SX_CMD_WINS, 0, g->snd_nxt, 0, NULL, 0, NULL, 0,
                           group_dst_ip(g), group_dst_port(g));
         g->adv_snd = g->snd_nxt;
