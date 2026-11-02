@@ -49,6 +49,7 @@
 - 单播、组播、广播均支持 256KB 自动拆包/重组；组播/广播仍为 best-effort 语义。
 - 文档增加静态 ARP、CC、UDP 缓冲、RTO、PTP、硬件时间戳、AF_XDP 基准与 45/46 测试记录
   （`e17b283`、`5c612f8`、`e0b6c74`、`740dce1`、`a8d48e6`、`b40d31e`）。
+- 补齐部署权限说明：AF_XDP 增加 `CAP_NET_RAW`，区分内核 < 5.8 的 `CAP_SYS_ADMIN`，补充 `setcap`/systemd 示例、特权端口要求与非 root 时 `AUTO` 回退 UDP 的行为（`README.md`、`MANUAL.md` 第 6/13/14/15 节）。
 
 ### Tests
 

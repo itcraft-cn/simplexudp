@@ -149,10 +149,12 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `ifname` | NULL | 网卡名；AF_XDP 必填，UDP 后端可为 NULL |
-| `backend` | `SX_BACKEND_AUTO` | `AUTO`=优先 XDP 失败回退 UDP；`XDP`/`UDP` 强制 |
+| `backend` | `SX_BACKEND_AUTO` | `AUTO`=优先 XDP，失败（含权限不足）回退 UDP；`XDP`/`UDP` 强制 |
 | `xdp_mode` | `SX_XDP_MODE_AUTO` | `AUTO`=native 失败回退 generic；`NATIVE`/`GENERIC` |
 | `xdp_bind` | `SX_XDP_BIND_AUTO` | `AUTO`=zero-copy 失败回退 copy；`COPY`/`ZEROCOPY` |
 | `xdp_queue` | 0 | 绑定的 RX 队列 |
+
+`AUTO` 仅在指定了 `ifname` 时尝试 AF_XDP，未指定 `ifname` 时直接使用内核 UDP。非 root 且未授予相应能力时，XDP 初始化会因权限失败而回退 UDP，可通过 `stats.backend_fallback=1` 确认发生了降级；强制 `SX_BACKEND_XDP` 时不会回退，`sx_start` 返回 `SX_ERR_BACKEND`。权限配置见第 14 节。
 
 ### 本地标识
 
@@ -488,7 +490,7 @@ cfg.on_recv_ex = on_msg;
 - **RTO 退避**：默认指数退避；专线可在确认链路无拥塞、仅有随机丢包时设 `rto_backoff=0`，
   避免高丢包下吞吐崩塌。该模式会放大重复包，必须配合监控与丢包原因确认，不建议作为通用默认。
 - **UDP 缓冲**：高 PPS 或突发场景设置 `udp_rcvbuf`/`udp_sndbuf`（如 1~4MB）。库内优先使用
-  `SO_RCVBUFFORCE`/`SO_SNDBUFFORCE`，无权限时回退普通 `setsockopt`，并在日志中打印实际值。
+  `SO_RCVBUFFORCE`/`SO_SNDBUFFORCE`（需要 `CAP_NET_ADMIN`），无权限时回退普通 `setsockopt`，并在日志中打印实际值。
   注意缓冲过大可能增加排队时延，低延迟场景应结合实测取折中值，而不是盲目开到系统上限。
 - **绑核**：时延敏感场景把收发进程分别绑定到不同**性能核**，并避开中断核。实测不绑核
   max 抖动可达数百 us，绑到两个不同性能核后降到约 20~30us：
@@ -505,11 +507,51 @@ cfg.on_recv_ex = on_msg;
 
 ## 14. 部署与权限
 
-- **AF_XDP**：需要 `CAP_BPF`、`CAP_NET_ADMIN`（加载/attach XDP）与足够的内存锁上限；
-  传统内核还需 `RLIMIT_MEMLOCK`（`ulimit -l unlimited`）。可用 `setcap` 授予最小能力，
-  或由 systemd 指定 `AmbientCapabilities`。
-- **内核 UDP**：普通用户即可。
-- 程序正常退出会 detach XDP；异常退出需手动清理。
+### 14.1 AF_XDP 所需能力
+
+AF_XDP 需要加载并 attach XDP 程序、创建 AF_XDP socket，因此需要特权或等价能力：
+
+| 能力 | 用途 | 适用内核 |
+| --- | --- | --- |
+| `CAP_BPF` | 加载 BPF 程序 | ≥ 5.8 |
+| `CAP_SYS_ADMIN` | 加载 BPF 程序（旧接口） | < 5.8 |
+| `CAP_NET_ADMIN` | attach/detach XDP，部分网卡配置 | 全部 |
+| `CAP_NET_RAW` | 创建 AF_XDP socket | 全部 |
+| `CAP_NET_BIND_SERVICE` | 绑定 1024 以下端口 | 仅低端口时需要 |
+
+此外还需要足够的内存锁上限：AF_XDP 的 UMEM 内存按 `RLIMIT_MEMLOCK` 记账，需放开限制（`ulimit -l unlimited`，或为进程授予 `CAP_IPC_LOCK`）。最小特权部署优先使用 `setcap` 或 systemd，不建议整进程 root：
+
+```sh
+# 内核 >= 5.8：授予最小能力集
+sudo setcap cap_bpf,cap_net_admin,cap_net_raw+ep /path/to/app
+
+# 需要绑定 1024 以下端口时追加
+sudo setcap cap_bpf,cap_net_admin,cap_net_raw,cap_net_bind_service+ep /path/to/app
+```
+
+```ini
+# systemd 单元片段
+[Service]
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
+LimitMEMLOCK=infinity
+```
+
+`setcap` 的能力附着在可执行文件上，升级或替换二进制后需要重新设置；同时应确保该文件及其所在目录不可被普通用户替换，否则等同于提权入口。
+
+### 14.2 内核 UDP 后端
+
+内核 UDP 后端普通用户即可运行，不需要任何能力。唯一例外是绑定 1024 以下端口时需要 `CAP_NET_BIND_SERVICE`。配置 `udp_rcvbuf`/`udp_sndbuf` 时若没有 `CAP_NET_ADMIN`，库会退回普通 `setsockopt`，实际值受 `net.core.rmem_max`/`net.core.wmem_max` 限制。
+
+### 14.3 后端选择与回退
+
+- 未指定 `ifname`：`AUTO` 直接使用内核 UDP，不需要特权。
+- 指定 `ifname` 且 `AUTO`：优先 AF_XDP；权限不足、attach 失败或网卡不支持时回退 UDP，并置 `stats.backend_fallback=1`。
+- 强制 `SX_BACKEND_XDP`：不降级，初始化失败时 `sx_start` 返回 `SX_ERR_BACKEND`。
+
+### 14.4 XDP 清理
+
+程序正常退出会 detach XDP。进程被 `SIGKILL` 或异常退出可能残留 XDP 程序，可用 `sudo xdp-loader unload <if> --all` 或 `bpftool net detach` 清理。
 
 ---
 
@@ -535,6 +577,9 @@ UDP 后端下检查防火墙与端口绑定。
 
 **Q：如何确认真的走了 XDP？**
 `bpftool net show dev <if>` 看程序挂载；`bpftool map dump name sx_stats_map` 看重定向计数。
+
+**Q：非 root 能用吗？**
+可以。内核 UDP 后端不需要任何特权；AF_XDP 需要 root 或 `CAP_BPF`、`CAP_NET_ADMIN`、`CAP_NET_RAW` 等能力。`AUTO` 在权限不足时会回退 UDP，并置 `stats.backend_fallback=1`。详见第 14 节。
 
 ---
 

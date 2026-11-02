@@ -47,7 +47,7 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 - 构建工具：`make`（或 CMake ≥ 3.16）。
 - **AF_XDP 后端**额外需要：`libbpf`、`libxdp` 开发包，`clang`（支持 `-target bpf`，用于编译 XDP 程序），
   `xxd`（把 BPF 目标内嵌为字节数组），`pkg-config`（可选，用于探测 libbpf/libxdp）。
-- 运行 AF_XDP 需要 root（或 `CAP_BPF` + `CAP_NET_ADMIN`）；**内核 UDP 后端无需特权**。
+- 运行 AF_XDP 需要 root，或授予 `CAP_BPF`、`CAP_NET_ADMIN`、`CAP_NET_RAW`（内核 < 5.8 还需 `CAP_SYS_ADMIN`）并放开内存锁上限；**内核 UDP 后端无需特权**，只有绑定 1024 以下端口时才需要 `CAP_NET_BIND_SERVICE`。最小能力集、`setcap` 与 systemd 示例见 [MANUAL.md](MANUAL.md) 第 14 节。
 
 ```sh
 # Debian / Ubuntu
@@ -221,6 +221,7 @@ SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latenc
   静态项不可被 ARP 应答覆盖、不老化。跨网段设置 `gateway_ip`/`netmask` 并为网关注册静态映射。
 - generic 模式强制 copy；zero-copy 需要网卡驱动支持。
 - 组播在 XDP 后端需接口接受该组播（可能需要 `ip maddr add` 或 allmulti）。
+- 非 root 且未授予相应能力时：`SX_BACKEND_AUTO` 会回退内核 UDP 并置 `stats.backend_fallback=1`；强制 `SX_BACKEND_XDP` 不会回退，`sx_start` 返回 `SX_ERR_BACKEND`。
 
 ## 可靠性语义
 
