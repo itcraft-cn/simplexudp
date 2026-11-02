@@ -82,7 +82,7 @@ $(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency $(BUILD)/test_throu
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all bpf bpf-echo xdp-echo test-xdp-echo test-io-echo test-hwts examples tests tests-xdp tests-latency tests-throughput group-tools relay-tool check check-xdp check-latency check-latency-2p install uninstall clean
+.PHONY: all bpf bpf-echo xdp-echo test-xdp-echo test-io-echo test-hwts unicast-big examples tests tests-xdp tests-latency tests-throughput group-tools relay-tool check check-xdp check-latency check-latency-2p install uninstall clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 install: all
@@ -136,6 +136,11 @@ test-xdp-echo: $(BUILD)/test_xdp_echo
 test-io-echo: $(BUILD)/test_io_echo
 
 test-hwts: $(BUILD)/test_hwts
+
+unicast-big: $(BUILD)/test_unicast_big
+
+$(BUILD)/test_unicast_big: tests/test_unicast_big.c $(STATIC_LIB) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< $(STATIC_LIB) -o $@ $(LDLIBS)
 
 $(BUILD)/test_hwts: tests/test_hwts.c | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< -o $@
