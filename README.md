@@ -6,8 +6,10 @@
 
 - 目标平台：Linux x86_64 / aarch64，C99。
 - 单包净荷上限固定（默认 1400），严格小于 MTU，不做 IP 分片；超过上限的消息自动拆包/重组，单条消息上限 256KB；单播、组播、广播均支持。
-- `send_window` 可配置，并会按 `max_message` 自动提升，硬下限 256、上限 65536，保证 256KB 消息一次入窗。
+- `send_window` 可配置，并会按 `max_message` 自动提升，硬下限 256、上限 65536，保证 256KB 消息一次入窗；
+  `large_message_burst` 控制大消息是否临时拉满 `cwnd`（默认 1，设 0 走严格慢启动）。
 - 可靠性借鉴 **KCP**：滑动窗口、累积+选择性确认、快速重传、RTO 退避、RTT 估计、流控与拥塞控制；专线可设 `SX_CC_OFF` 关闭窗口调节。
+- 对端重启通过随机 `peer_id` 自动识别并重同步；组播晚加入/来源超时后按重排窗口快进。
 - 组播/广播采用 **高水位 + NACK** 的尽力可靠（best-effort reliable）+ 按序投递。
 - AF_XDP 支持静态 ARP（不可被应答覆盖）与跨网段网关配置。
 - UDP 后端支持 `udp_rcvbuf`/`udp_sndbuf` 缓冲配置；专线可关闭 RTO 指数退避（`rto_backoff=0`）。
@@ -63,7 +65,7 @@ sudo dnf install -y gcc clang llvm libbpf-devel libxdp-devel pkgconf-pkg-config 
 make                 # 构建 build/libsimplexudp.a 与 .so（默认含 XDP BPF 目标）
 make bpf             # 仅编译 XDP BPF 目标
 make examples        # 示例：build/sx_p2p、build/sx_group
-make tests           # 单元/回环测试：build/test_{frame,proto,kcp,loopback,recv}
+make tests           # 单元/回环测试：build/test_{frame,proto,kcp,loopback,recv,arp,cc,frag}
 make tests-xdp       # AF_XDP 端到端测试：build/test_xdp
 make tests-latency   # 时延测试：build/test_latency
 make tests-throughput# 吞吐/长稳测试：build/test_throughput
@@ -160,9 +162,10 @@ sx_destroy(ep);
 - `tests/test_frame.c`：帧构造/解析与校验和防御。
 - `tests/test_proto.c`：协议头编解码边界。
 - `tests/test_kcp.c`：注入 **丢包 + 相邻乱序**，验证 100/100 按序到达且确有重传。
-- `tests/test_loopback.c`：UDP 后端端到端双向有序投递。
+- `tests/test_loopback.c`：UDP 后端端到端双向有序投递，含 4KB 与 200KB 分片重组。
 - `tests/test_arp.c`：静态 ARP 不被伪造应答覆盖、不老化。
 - `tests/test_cc.c`：`SX_CC_OFF` 不降窗、`SX_CC_ON` 超时降窗。
+- `tests/test_frag.c`：分片发送/重组与 256KB 大消息窗口。
 - `tests/test_xdp.c` + `scripts/veth_test.sh`：veth 上 AF_XDP native/copy 端到端。
 - `tests/test_latency.c` + `scripts/xdp_latency.sh`：停等往返时延统计（min/avg/p50/p99/max），
   并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
@@ -227,3 +230,6 @@ SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latenc
 
 - **单播**：严格可靠有序。累积确认 `una` + 选择性确认 `ack_list` + 快速重传 + RTO 重传 + 拥塞/流控。
 - **组播/广播**：尽力可靠 + 有序。发送端保留历史窗口并周期性广播高水位；接收端侦测空洞后回送 `NACK`，发送端从历史重发到组地址。不保证送达（无多方 ACK 汇聚）。
+- **会话重同步**：对端重启后 `HELLO` 携带新的随机 `peer_id`，本端自动重置窗口并重新握手；
+  重同步会丢弃重启前未确认的发送数据。
+- **重组失败**：分片重组失败时不推进接收序号、不发送 ACK，交由重传恢复。
