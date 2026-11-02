@@ -160,6 +160,8 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `local_ip` | 0 | 本机 IPv4（主机序）；0=不指定/由后端推导 |
 | `gateway_ip` | 0 | 跨网段下一跳 IPv4（主机序）；0=不做网关转发 |
 | `netmask` | 0 | 本接口子网掩码（主机序）；0=由 XDP 后端自动探测 |
+| `udp_rcvbuf` | 0 | UDP 接收缓冲字节数；0=系统默认；建议 1~4MB，避免突发丢包 |
+| `udp_sndbuf` | 0 | UDP 发送缓冲字节数；0=系统默认 |
 | `local_port` | 0 | 本地端口（主机序）；0=内核分配（UDP） |
 | `conv` | `SX_DEFAULT_CONV` | 会话/组标识 |
 
@@ -180,6 +182,7 @@ static void on_msg(sx_endpoint_t *ep, sx_link_t *link,
 | `min_rto_ms` | 100 | 最小重传超时 |
 | `max_rto_ms` | 5000 | 最大重传超时 |
 | `cc_mode` | `SX_CC_ON` | `SX_CC_OFF` 关闭拥塞窗口调节，仅保留 RTO 退避/重传 |
+| `rto_backoff` | 1 | 1=超时 RTO 指数退避；0=固定 RTO（专线，需谨慎） |
 | `keepalive_ms` | 10000 | 空闲心跳间隔 |
 | `timeout_ms` | 30000 | 对端无响应判定为 DOWN 的阈值 |
 
@@ -400,6 +403,11 @@ SX 头（网络序，32 字节）：`magic/ver/cmd | conv | peer_id | seq | una 
 - **MTU/净荷**：`max_payload` 越大吞吐越高，但必须 < MTU；本库不分片。
 - **窗口**：`send_window`/`recv_window` 影响吞吐与内存；高 BDP 链路可增大。
 - **RTO**：局域网可减小 `min_rto_ms`（如 20~50）；跨广域网保持 100+。
+- **RTO 退避**：默认指数退避；专线可在确认链路无拥塞、仅有随机丢包时设 `rto_backoff=0`，
+  避免高丢包下吞吐崩塌。该模式会放大重复包，必须配合监控与丢包原因确认，不建议作为通用默认。
+- **UDP 缓冲**：高 PPS 或突发场景设置 `udp_rcvbuf`/`udp_sndbuf`（如 1~4MB）。库内优先使用
+  `SO_RCVBUFFORCE`/`SO_SNDBUFFORCE`，无权限时回退普通 `setsockopt`，并在日志中打印实际值。
+  注意缓冲过大可能增加排队时延，低延迟场景应结合实测取折中值，而不是盲目开到系统上限。
 - **绑核**：时延敏感场景把收发进程分别绑定到不同**性能核**，并避开中断核。实测不绑核
   max 抖动可达数百 us，绑到两个不同性能核后降到约 20~30us：
 

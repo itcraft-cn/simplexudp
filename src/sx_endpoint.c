@@ -47,6 +47,7 @@ void sx_config_init(sx_config_t *cfg) {
     cfg->min_rto_ms = 100;
     cfg->max_rto_ms = 5000;
     cfg->cc_mode = SX_CC_ON;
+    cfg->rto_backoff = 1;
     cfg->keepalive_ms = 10000;
     cfg->timeout_ms = 30000;
     cfg->umem_frames = 4096;
@@ -938,6 +939,7 @@ int sx_get_stats(sx_endpoint_t *ep, sx_stats_t *out) {
     pthread_mutex_lock(&ep->lock);
     *out = ep->stats;
     out->cc_mode = (uint32_t)ep->cfg.cc_mode;
+    out->rto_backoff = ep->cfg.rto_backoff ? 1u : 0u;
     for (i = 0; i < ep->nlinks; i++) {
         sx_link_t *l = ep->links[i];
         if (l != NULL && l->kcp != NULL) {
@@ -948,6 +950,7 @@ int sx_get_stats(sx_endpoint_t *ep, sx_stats_t *out) {
             out->rtt_ms = l->kcp->srtt;
             out->rto_ms = l->kcp->rto_ms;
             out->cc_mode = l->kcp->cc_enabled ? SX_CC_ON : SX_CC_OFF;
+            out->rto_backoff = l->kcp->rto_backoff ? 1u : 0u;
             break;
         }
     }

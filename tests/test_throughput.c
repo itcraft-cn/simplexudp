@@ -87,6 +87,12 @@ static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
             cfg->cc_mode = SX_CC_OFF;
         }
     }
+    {
+        const char *rb = getenv("SX_RTO_BACKOFF");
+        if (rb != NULL) {
+            cfg->rto_backoff = (uint32_t)atoi(rb);
+        }
+    }
 }
 
 static int run_server(int use_xdp, const char *ifname, uint32_t ip,

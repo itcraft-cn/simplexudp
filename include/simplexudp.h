@@ -151,6 +151,7 @@ typedef struct sx_stats {
     uint32_t rtt_ms;        /* 平滑 RTT */
     uint32_t rto_ms;        /* 当前 RTO */
     uint32_t cc_mode;       /* 实际拥塞控制模式：sx_cc_mode_t */
+    uint32_t rto_backoff;   /* 实际 RTO 退避策略：1=指数退避，0=固定 */
     uint32_t backend;       /* 实际后端：sx_backend_t */
     uint32_t backend_fallback; /* 1 = AUTO 模式曾尝试 XDP 并回退到 UDP */
     uint32_t xdp_mode;      /* 实际 attach 模式：sx_xdp_mode_t */
@@ -194,6 +195,8 @@ typedef struct sx_config {
     uint32_t multicast_if; /* 组播出口/入组接口 IPv4（主机序）；0=默认接口 */
     uint32_t gateway_ip;   /* 跨网段下一跳 IPv4（主机序）；0=不做网关转发 */
     uint32_t netmask;      /* 本接口子网掩码（主机序）；0=由 XDP 后端自动探测 */
+    uint32_t udp_rcvbuf;   /* UDP 接收缓冲字节数；0=系统默认；建议 1~4MB */
+    uint32_t udp_sndbuf;   /* UDP 发送缓冲字节数；0=系统默认 */
     uint16_t local_port;   /* 本地 UDP 端口（主机序） */
     uint32_t conv;         /* 会话/组标识，默认 SX_DEFAULT_CONV */
 
@@ -210,6 +213,7 @@ typedef struct sx_config {
     uint32_t min_rto_ms;   /* 最小 RTO，默认 100 */
     uint32_t max_rto_ms;   /* 最大 RTO，默认 5000 */
     sx_cc_mode_t cc_mode;  /* 拥塞控制模式，默认 SX_CC_ON；专线可设 SX_CC_OFF */
+    uint32_t rto_backoff;  /* 1=超时 RTO 指数退避（默认）；0=固定 RTO，仅重传不翻倍 */
     uint32_t keepalive_ms; /* 空闲心跳间隔，默认 10000 */
     uint32_t timeout_ms;   /* 对端超时判定，默认 30000 */
 

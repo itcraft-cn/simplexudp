@@ -50,6 +50,7 @@ static void setup(sx_endpoint_t *ep, sx_link_t *link, sx_io_t *io,
     ep->cfg.min_rto_ms = 20;
     ep->cfg.max_rto_ms = 1000;
     ep->cfg.cc_mode = cc;
+    ep->cfg.rto_backoff = 1;
 
     ep->io = io;
     io->name = "fake";
@@ -68,14 +69,19 @@ int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "test_cc.log";
     sx_endpoint_t ep1;
     sx_endpoint_t ep2;
+    sx_endpoint_t ep3;
     sx_link_t link1;
     sx_link_t link2;
+    sx_link_t link3;
     sx_io_t io1;
     sx_io_t io2;
+    sx_io_t io3;
     fakeio_t fio1;
     fakeio_t fio2;
+    fakeio_t fio3;
     sx_kcp_t *off;
     sx_kcp_t *on;
+    sx_kcp_t *fixed;
     uint32_t payload = 0x12345678u;
 
     T_BEGIN(path);
@@ -117,6 +123,25 @@ int main(int argc, char **argv) {
           (unsigned long long)ep2.stats.timeouts);
     T_CHECK(ep2.stats.timeouts > 0, "cc on timeout happened");
     T_CHECK(on->cwnd == 1, "cc on cwnd collapsed");
+
+    /* rto_backoff=0：超时只重传，不把 RTO 翻倍。 */
+    setup(&ep3, &link3, &io3, &fio3, 256, SX_CC_OFF);
+    ep3.cfg.rto_backoff = 0;
+    fixed = sx_kcp_create(&ep3, &link3, CONV, 256, 512);
+    T_CHECK(fixed != NULL, "fixed rto kcp create");
+    if (fixed != NULL) {
+        link3.kcp = fixed;
+        T_CHECK(fixed->rto_backoff == 0, "rto backoff disabled flag");
+        T_CHECK(sx_kcp_send(fixed, &payload, sizeof(payload)) >= 0,
+                "fixed rto send");
+        usleep(30000);
+        sx_kcp_update(fixed, sx_now_ms());
+        T_LOG("fixed rto: cwnd=%u rto=%u timeouts=%llu", fixed->cwnd,
+              fixed->rto_ms, (unsigned long long)ep3.stats.timeouts);
+        T_CHECK(ep3.stats.timeouts > 0, "fixed rto timeout happened");
+        T_CHECK(fixed->rto_ms == 20, "fixed rto not backed off");
+        sx_kcp_destroy(fixed);
+    }
 
     sx_kcp_destroy(off);
     sx_kcp_destroy(on);

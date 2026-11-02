@@ -156,6 +156,7 @@ sx_kcp_t *sx_kcp_create(sx_endpoint_t *ep, sx_link_t *link, uint32_t conv,
     k->recv_cap = rcap;
     k->snd_wnd = send_window > 0 ? send_window : 256u;
     k->cc_enabled = (ep->cfg.cc_mode != SX_CC_OFF);
+    k->rto_backoff = (ep->cfg.rto_backoff != 0);
     /* 专线模式：窗口一次性拉满，后续不随 ACK 增长、不随超时回退。
      * 仍然受对端通告窗口（snd_wnd）约束。 */
     k->cwnd = k->cc_enabled ? SX_MIN(k->snd_wnd, 16u) : k->snd_wnd;
@@ -637,8 +638,10 @@ static void kcp_check_retrans(sx_kcp_t *k, uint64_t now) {
         }
     }
     if (timeout) {
-        /* RTO 退避始终保留；拥塞窗口仅在 CC 开启时回退。 */
-        k->rto_ms = SX_MIN(k->rto_ms * 2u, k->max_rto);
+        /* RTO 退避可配置：默认指数退避；专线可关闭，仅保留重传。 */
+        if (k->rto_backoff) {
+            k->rto_ms = SX_MIN(k->rto_ms * 2u, k->max_rto);
+        }
         if (k->cc_enabled) {
             k->ssthresh = SX_MAX(k->cwnd / 2u, 2u);
             k->cwnd = 1;

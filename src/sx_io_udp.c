@@ -204,6 +204,61 @@ static void udp_close(sx_io_t *io) {
     free(io);
 }
 
+/* 应用 UDP 收发缓冲配置。优先使用 FORCE 变体（需 CAP_NET_ADMIN），
+ * 失败则回退普通 setsockopt；最后读取实际值并记录，便于现场确认是否被内核钳制。 */
+static void udp_apply_bufs(sx_endpoint_t *ep, int fd) {
+    struct {
+        int opt;
+        int force_opt;
+        uint32_t req;
+        const char *name;
+    } bufs[2];
+    size_t i;
+
+    bufs[0].opt = SO_RCVBUF;
+#ifdef SO_RCVBUFFORCE
+    bufs[0].force_opt = SO_RCVBUFFORCE;
+#else
+    bufs[0].force_opt = SO_RCVBUF;
+#endif
+    bufs[0].req = ep->cfg.udp_rcvbuf;
+    bufs[0].name = "rcvbuf";
+    bufs[1].opt = SO_SNDBUF;
+#ifdef SO_SNDBUFFORCE
+    bufs[1].force_opt = SO_SNDBUFFORCE;
+#else
+    bufs[1].force_opt = SO_SNDBUF;
+#endif
+    bufs[1].req = ep->cfg.udp_sndbuf;
+    bufs[1].name = "sndbuf";
+
+    for (i = 0; i < 2; i++) {
+        int val;
+        int actual = 0;
+        socklen_t alen = sizeof(actual);
+        if (bufs[i].req == 0) {
+            continue;
+        }
+        val = (int)bufs[i].req;
+        if (setsockopt(fd, SOL_SOCKET, bufs[i].force_opt, &val, sizeof(val)) != 0 &&
+            setsockopt(fd, SOL_SOCKET, bufs[i].opt, &val, sizeof(val)) != 0) {
+            sx_log(ep, SX_LOG_WARN, "udp %s=%u setsockopt failed",
+                   bufs[i].name, bufs[i].req);
+            continue;
+        }
+        if (getsockopt(fd, SOL_SOCKET, bufs[i].opt, &actual, &alen) == 0) {
+            sx_log(ep, SX_LOG_INFO, "udp %s requested=%u actual=%d",
+                   bufs[i].name, bufs[i].req, actual);
+            if (actual < (int)bufs[i].req) {
+                sx_log(ep, SX_LOG_WARN,
+                       "udp %s clamped to %d (< requested %u); check "
+                       "net.core.rmem_max/wmem_max or CAP_NET_ADMIN",
+                       bufs[i].name, actual, bufs[i].req);
+            }
+        }
+    }
+}
+
 sx_io_t *sx_io_udp_create(sx_endpoint_t *ep) {
     sx_io_t *io;
     sx_udp_priv_t *p;
@@ -228,6 +283,7 @@ sx_io_t *sx_io_udp_create(sx_endpoint_t *ep) {
         free(p);
         return NULL;
     }
+    udp_apply_bufs(ep, p->sock);
     /* 仅 SO_REUSEADDR：允许多个组播成员绑定同一端口并各自收到副本。
      * 注意不要设置 SO_REUSEPORT，否则单播/组播可能被内核在多 socket 间负载均衡。 */
     (void)setsockopt(p->sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));

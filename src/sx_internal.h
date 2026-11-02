@@ -281,6 +281,7 @@ typedef struct sx_kcp {
     uint32_t cwnd_cnt;   /* 拥塞避免计数 */
     uint32_t ssthresh;
     int cc_enabled;      /* 0 = 专线模式，窗口不随 ACK/超时变化 */
+    int rto_backoff;     /* 1 = 超时 RTO 指数退避；0 = 固定 RTO */
     uint32_t send_cap;   /* 发送环容量（2 的幂） */
     sx_msg_t *snd_buf;   /* 发送环 [send_cap] */
     uint32_t snd_count;  /* 在途消息数 */

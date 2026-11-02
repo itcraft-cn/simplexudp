@@ -10,6 +10,7 @@
 #include "../src/sx_internal.h"
 
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "sx_test.h"
@@ -88,6 +89,8 @@ int main(int argc, char **argv) {
     ccfg = scfg;
     ccfg.user = &cctx;
     ccfg.cc_mode = SX_CC_OFF; /* 覆盖专线模式下的 API/统计路径 */
+    ccfg.udp_rcvbuf = 65536;
+    ccfg.udp_sndbuf = 65536;
 
     srv = sx_create(&scfg);
     T_CHECK(srv != NULL, "server create");
@@ -109,10 +112,17 @@ int main(int argc, char **argv) {
     T_CHECK(sx_start(cli) == SX_OK, "client start");
     {
         sx_stats_t st;
+        int rcv = 0;
+        socklen_t rlen = sizeof(rcv);
         T_CHECK(sx_get_stats(cli, &st) == SX_OK, "client stats");
         T_CHECK(st.cc_mode == (uint32_t)SX_CC_OFF, "cc off in stats");
+        T_CHECK(st.rto_backoff == 1u, "rto backoff default in stats");
         T_CHECK(st.backend == (uint32_t)SX_BACKEND_UDP, "udp backend chosen");
         T_CHECK(st.backend_fallback == 0, "no fallback for forced udp");
+        T_CHECK(getsockopt(cli->io->fd, SOL_SOCKET, SO_RCVBUF, &rcv, &rlen) == 0 &&
+                    rcv > 0,
+                "udp rcvbuf applied");
+        T_LOG("udp actual rcvbuf=%d", rcv);
     }
 
     cl = sx_add_unicast_mac(cli, 0x7f000001u, sport, static_mac);

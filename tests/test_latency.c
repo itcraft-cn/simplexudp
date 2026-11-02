@@ -102,6 +102,43 @@ static uint32_t parse_ip(const char *s) {
     return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
 
+/* 解析 SX_STATIC_ARP=IP@MAC，例如 192.168.111.46@04:3f:72:d4:67:f1。 */
+static int parse_static_arp(const char *s, uint32_t *ip, uint8_t mac[6]) {
+    const char *at;
+    char ipbuf[32];
+    unsigned m[6];
+    size_t n;
+
+    if (s == NULL) {
+        return -1;
+    }
+    at = strchr(s, '@');
+    if (at == NULL) {
+        return -1;
+    }
+    n = (size_t)(at - s);
+    if (n == 0 || n >= sizeof(ipbuf)) {
+        return -1;
+    }
+    memcpy(ipbuf, s, n);
+    ipbuf[n] = '\0';
+    *ip = parse_ip(ipbuf);
+    if (*ip == 0) {
+        return -1;
+    }
+    if (sscanf(at + 1, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+               &m[4], &m[5]) != 6) {
+        return -1;
+    }
+    for (n = 0; n < 6; n++) {
+        if (m[n] > 0xff) {
+            return -1;
+        }
+        mac[n] = (uint8_t)m[n];
+    }
+    return 0;
+}
+
 static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
                         uint32_t ip, uint16_t port, sx_recv_fn recv) {
     sx_config_init(cfg);
@@ -124,10 +161,37 @@ static void fill_common(sx_config_t *cfg, int use_xdp, const char *ifname,
         }
     }
     {
+        const char *rb = getenv("SX_RTO_BACKOFF");
+        if (rb != NULL) {
+            cfg->rto_backoff = (uint32_t)atoi(rb);
+        }
+    }
+    {
         const char *q = getenv("SX_XDP_QUEUE");
         if (q != NULL) {
             cfg->xdp_queue = atoi(q);
         }
+    }
+}
+
+/* 可选：启动前注册静态 ARP，配合 SX_XDP_QUEUE 做 zero-copy/flow steering 测试。 */
+static void apply_static_arp(sx_endpoint_t *ep) {
+    const char *s = getenv("SX_STATIC_ARP");
+    uint32_t ip = 0;
+    uint8_t mac[6];
+    if (s == NULL || s[0] == '\0') {
+        return;
+    }
+    if (parse_static_arp(s, &ip, mac) != 0) {
+        fprintf(g_log, "SX_STATIC_ARP parse failed: %s\n", s);
+        return;
+    }
+    if (sx_add_static_arp(ep, ip, mac) == SX_OK) {
+        fprintf(g_log, "static arp %u.%u.%u.%u -> %02x:%02x:%02x:%02x:%02x:%02x\n",
+                (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff,
+                ip & 0xff, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        fprintf(g_log, "static arp add failed\n");
     }
 }
 
@@ -141,8 +205,14 @@ static int run_server(int use_xdp, const char *ifname, uint32_t ip,
 
     fill_common(&cfg, use_xdp, ifname, ip, port, b_recv);
     ep = sx_create(&cfg);
-    if (ep == NULL || sx_start(ep) != SX_OK) {
-        fprintf(g_log, "server create/start failed\n");
+    if (ep == NULL) {
+        fprintf(g_log, "server create failed\n");
+        fclose(g_log);
+        return 1;
+    }
+    apply_static_arp(ep);
+    if (sx_start(ep) != SX_OK) {
+        fprintf(g_log, "server start failed\n");
         fclose(g_log);
         return 1;
     }
@@ -180,8 +250,14 @@ static int run_client(int use_xdp, const char *ifname, uint32_t lip,
 
     fill_common(&cfg, use_xdp, ifname, lip, lport, a_recv);
     ep = sx_create(&cfg);
-    if (ep == NULL || sx_start(ep) != SX_OK) {
-        fprintf(g_log, "client create/start failed\n");
+    if (ep == NULL) {
+        fprintf(g_log, "client create failed\n");
+        fclose(g_log);
+        return 1;
+    }
+    apply_static_arp(ep);
+    if (sx_start(ep) != SX_OK) {
+        fprintf(g_log, "client start failed\n");
         fclose(g_log);
         return 1;
     }
