@@ -214,6 +214,58 @@ away from the cores in use (`/proc/irq/*/smp_affinity_list`).
 SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latency
 ```
 
+### Cross-host measurements (10.45 / 10.46, 25G direct link)
+
+Topology: mlx5_core 25G, 10.45 `p3p2` 192.168.111.45 / 10.46 `ens3f1` 192.168.111.46;
+the data interfaces use `combined 1` during tests and are restored to `combined 40` afterwards. AF_XDP is
+native + copy, stop-and-wait RTT, n=20000:
+
+| Path | min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| AF_XDP 10.45 -> 10.46 | 10us | 16us | 16us | 31us | 94us |
+| AF_XDP 10.46 -> 10.45 | 7us | 23us | 21us | 38us | 91us |
+| Kernel UDP 10.45 -> 10.46 | 15us | 20us | 19us | 37us | 166us |
+
+Throughput (500000 × 1024B):
+
+| Backend | Client MB/s | msg/s | Retransmits | Timeouts | Server dup | Server reorder |
+| --- | --- | --- | --- | --- | --- | --- |
+| Kernel UDP | 312.60 | 305276 | 3333 | 0 | 3167 | 1545 |
+| AF_XDP native+copy | 251.20 | 245308 | 16 | 13 | 0 | 5 |
+
+UDP has higher peak throughput but noticeable cross-host loss/retransmission; AF_XDP is slightly slower but has
+near-zero retransmission and reordering, giving better stability.
+
+zero-copy and CPU pinning (`combined 2` + Flow Director steering to queue 2 + static ARP):
+
+| Mode | Run | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| copy, unpinned | 1 | 16us | 31us | 94us |
+| copy, pinned | 1~2 | 15us | 30us | 43~106us |
+| zero-copy, unpinned | 1 | 19us | 31us | 1065us |
+| zero-copy, pinned | 1~2 | 16us | 23~24us | 71~358us |
+
+A pure XDP_TX benchmark with KCP/user-space reflection removed gives p50 10~11us and p99 13~15us; switching the sender
+to AF_XDP gives p50 8~10us. With `SX_BUSY_POLL=1` skipping the per-packet `poll()`, the KCP path improves from p50
+15us to 11us and p99 from 31us to 26us.
+
+Hardware-timestamp one-way measurements (after PTP sync, n=10000):
+
+| Direction | min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| 10.45 -> 10.46 | 0.363us | 0.384us | 0.384us | 0.405us | 2.524us |
+| 10.46 -> 10.45 | 0.385us | 0.405us | 0.405us | 0.425us | 0.436us |
+
+The NIC-to-NIC physical one-way latency is about 0.4us; the 4~5us obtained from RTT/2 is dominated by software-path
+overhead.
+
+Large-message verification: unicast 256KB completes automatic fragmentation, reliable transmission, reassembly, and
+content verification on 45/46; multicast/broadcast 256KB both give got=1/1 and bad=0 (multicast/broadcast rely on NACK
+recovery, so the sender must linger to answer retransmissions).
+
+See `docs/cross-host-45-46-20261102.md` for the full topology, field issues (residual XDP, zero-copy queue offset),
+and per-item data.
+
 ## AF_XDP notes and limitations
 
 - Attach mode: native first, fall back to generic; bind: zero-copy first, fall back to copy (auto-detected).

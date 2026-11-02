@@ -214,6 +214,53 @@ iWLAN/WiFi 队列中断分布在 c0–c8，若追求极低抖动可把 IRQ 亲�
 SX_CPU_SERVER=2 SX_CPU_CLIENT=3 sudo scripts/xdp_latency_2p.sh build/test_latency
 ```
 
+### 跨机实测（10.45 / 10.46，25G 直连）
+
+拓扑：mlx5_core 25G，10.45 `p3p2` 192.168.111.45 / 10.46 `ens3f1` 192.168.111.46；
+测试期间数据口 `combined 1`，结束后恢复 `combined 40`。AF_XDP 为 native + copy，停等 RTT，n=20000：
+
+| 路径 | min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| AF_XDP 10.45 -> 10.46 | 10us | 16us | 16us | 31us | 94us |
+| AF_XDP 10.46 -> 10.45 | 7us | 23us | 21us | 38us | 91us |
+| 内核 UDP 10.45 -> 10.46 | 15us | 20us | 19us | 37us | 166us |
+
+吞吐（500000 × 1024B）：
+
+| 后端 | 客户端 MB/s | msg/s | 重传 | 超时 | 服务端 dup | 服务端 reorder |
+| --- | --- | --- | --- | --- | --- | --- |
+| 内核 UDP | 312.60 | 305276 | 3333 | 0 | 3167 | 1545 |
+| AF_XDP native+copy | 251.20 | 245308 | 16 | 13 | 0 | 5 |
+
+UDP 峰值吞吐更高但跨机丢包/重传明显；AF_XDP 吞吐略低，重传与乱序接近零，稳定性更好。
+
+zero-copy 与绑核（`combined 2` + Flow Director steer 队列 2 + 静态 ARP）：
+
+| 模式 | 运行 | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| copy，未绑核 | 1 | 16us | 31us | 94us |
+| copy，绑核 | 1~2 | 15us | 30us | 43~106us |
+| zero-copy，未绑核 | 1 | 19us | 31us | 1065us |
+| zero-copy，绑核 | 1~2 | 16us | 23~24us | 71~358us |
+
+剥离 KCP/用户态反射的纯 XDP_TX 基准 p50 10~11us、p99 13~15us；发送端改用 AF_XDP 后
+p50 8~10us。`SX_BUSY_POLL=1` 跳过每包 `poll()` 后，KCP 路径 p50 15→11us、p99 31→26us。
+
+硬件时间戳单向测量（PTP 同步后，n=10000）：
+
+| 方向 | min | avg | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| 10.45 -> 10.46 | 0.363us | 0.384us | 0.384us | 0.405us | 2.524us |
+| 10.46 -> 10.45 | 0.385us | 0.405us | 0.405us | 0.425us | 0.436us |
+
+网卡到网卡物理单向时延约 0.4us；RTT/2 得到的 4~5us 主要包含软件路径开销。
+
+大消息验证：单播 256KB 在 45/46 完成自动分片、可靠传输、重组与内容校验；组播/广播 256KB
+均为 got=1/1、bad=0（组播/广播依赖 NACK 恢复，发送端需 linger 以响应重传）。
+
+完整拓扑、现场问题（残留 XDP、zero-copy 队列偏移）与逐项数据见
+`docs/cross-host-45-46-20261102.md`。
+
 ## AF_XDP 说明与限制
 
 - attach 模式：native 优先，失败回退 generic；bind：zero-copy 优先，失败回退 copy（自动侦测）。
