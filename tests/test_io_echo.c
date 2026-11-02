@@ -142,6 +142,18 @@ static int do_mirror(int use_xdp, const char *ifname, uint32_t ip,
         fclose(g_log);
         return 1;
     }
+    {
+        const char *sa = getenv("SX_STATIC_ARP");
+        uint32_t sip = 0;
+        uint8_t smac[6];
+        if (sa != NULL && io->set_static_arp != NULL &&
+            parse_static_arp(sa, &sip, smac) == 0 &&
+            io->set_static_arp(io, sip, smac) == SX_OK) {
+            fprintf(g_log, "mirror static arp %u.%u.%u.%u applied\n",
+                    (sip >> 24) & 0xff, (sip >> 16) & 0xff,
+                    (sip >> 8) & 0xff, sip & 0xff);
+        }
+    }
     fprintf(g_log, "mirror io=%s local=%s:%u count=%u xdp_bind=%u\n",
             io->name, ifname != NULL ? ifname : "-", ep.cfg.local_port, count,
             ep.stats.xdp_bind);
