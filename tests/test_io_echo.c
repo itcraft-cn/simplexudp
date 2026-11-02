@@ -103,6 +103,73 @@ static int recv_once(sx_io_t *io, void *buf, size_t cap, size_t *len) {
     return io->recvfrom(io, &sip, &sport, buf, cap, len);
 }
 
+
+static int do_mirror(int use_xdp, const char *ifname, uint32_t ip,
+                     uint16_t port, uint32_t count, const char *logpath) {
+    sx_endpoint_t ep;
+    sx_io_t *io;
+    uint32_t got = 0;
+    unsigned char buf[2048];
+
+    g_log = fopen(logpath, "w");
+    if (g_log == NULL) {
+        return 2;
+    }
+    memset(&ep, 0, sizeof(ep));
+    ep.cfg.backend = use_xdp ? SX_BACKEND_XDP : SX_BACKEND_UDP;
+    ep.cfg.ifname = ifname;
+    ep.cfg.local_ip = ip;
+    ep.cfg.local_port = port;
+    ep.cfg.max_payload = 1400;
+    ep.cfg.on_log = log_fn;
+    {
+        const char *q = getenv("SX_XDP_QUEUE");
+        const char *b = getenv("SX_XDP_BIND");
+        if (q != NULL) {
+            ep.cfg.xdp_queue = atoi(q);
+        }
+        if (b != NULL) {
+            if (strcmp(b, "zerocopy") == 0 || strcmp(b, "zc") == 0) {
+                ep.cfg.xdp_bind = SX_XDP_BIND_ZEROCOPY;
+            } else if (strcmp(b, "copy") == 0) {
+                ep.cfg.xdp_bind = SX_XDP_BIND_COPY;
+            }
+        }
+    }
+    io = use_xdp ? sx_io_xdp_create(&ep) : sx_io_udp_create(&ep);
+    if (io == NULL) {
+        fprintf(g_log, "mirror backend create failed\n");
+        fclose(g_log);
+        return 1;
+    }
+    fprintf(g_log, "mirror io=%s local=%s:%u count=%u xdp_bind=%u\n",
+            io->name, ifname != NULL ? ifname : "-", ep.cfg.local_port, count,
+            ep.stats.xdp_bind);
+
+    while (got < count) {
+        uint32_t sip = 0;
+        uint16_t sport = 0;
+        size_t len = 0;
+        int r = io->recvfrom(io, &sip, &sport, buf, sizeof(buf), &len);
+        if (r > 0) {
+            (void)io->sendto(io, sip, sport, buf, len);
+            got++;
+            if (got % 1000 == 0) {
+                fprintf(g_log, "mirror %u/%u\n", got, count);
+            }
+        }
+        if (io->update != NULL) {
+            io->update(io, now_ms());
+        }
+    }
+    fprintf(g_log, "mirror done=%u\n", got);
+    if (io->close != NULL) {
+        io->close(io);
+    }
+    fclose(g_log);
+    return got == count ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     const char *mode;
     const char *ifname;
@@ -123,6 +190,20 @@ int main(int argc, char **argv) {
     uint32_t i;
     uint8_t buf[256];
 
+    if (argc < 2) {
+        return 2;
+    }
+    if (strcmp(argv[1], "mirror") == 0) {
+        int use_xdp;
+        if (argc < 7) {
+            return 2;
+        }
+        use_xdp = (strcmp(argv[2], "xdp") == 0);
+        return do_mirror(use_xdp, argv[3], parse_ip(argv[4]),
+                         (uint16_t)atoi(argv[5]),
+                         (uint32_t)strtoul(argv[6], NULL, 10),
+                         argc > 7 ? argv[7] : "test_io_echo_mirror.log");
+    }
     if (argc < 8) {
         return 2;
     }
