@@ -241,11 +241,12 @@ int sx_io_xdp_send_frame(sx_io_t *io, const uint8_t *frame, size_t len) {
     if (len > p->frame_size) {
         return SX_ERR_TOO_LARGE;
     }
-    if (xsk_ring_prod__reserve(&p->tx, 1, &idx) != 1) {
-        return SX_ERR_AGAIN;
-    }
     addr = xdp_frame_alloc(p);
     if (addr == SX_XDP_INVALID_FRAME) {
+        return SX_ERR_AGAIN;
+    }
+    if (xsk_ring_prod__reserve(&p->tx, 1, &idx) != 1) {
+        xdp_frame_release(p, addr);
         return SX_ERR_AGAIN;
     }
     dst = xsk_umem__get_data(p->umem_area, addr);
@@ -320,11 +321,12 @@ static int xdp_sendto(sx_io_t *io, uint32_t dst_ip, uint16_t dst_port,
     if (p->frame_free == 0) {
         return SX_ERR_AGAIN;
     }
-    if (xsk_ring_prod__reserve(&p->tx, 1, &idx) != 1) {
-        return SX_ERR_AGAIN;
-    }
     addr = xdp_frame_alloc(p);
     if (addr == SX_XDP_INVALID_FRAME) {
+        return SX_ERR_AGAIN;
+    }
+    if (xsk_ring_prod__reserve(&p->tx, 1, &idx) != 1) {
+        xdp_frame_release(p, addr);
         return SX_ERR_AGAIN;
     }
     dst = xsk_umem__get_data(p->umem_area, addr);
@@ -392,8 +394,10 @@ static int xdp_recvfrom(sx_io_t *io, uint32_t *src_ip, uint16_t *src_port,
         {
             const uint8_t *payload = NULL;
             size_t plen = 0;
-            uint32_t sip = 0, dip = 0;
-            uint16_t sp = 0, dp = 0;
+            uint32_t sip = 0;
+            uint32_t dip = 0;
+            uint16_t sp = 0;
+            uint16_t dp = 0;
             if (sx_frame_parse(frame, flen, &sip, &dip, &sp, &dp, &payload,
                                &plen) == SX_OK) {
                 size_t copy = plen < cap ? plen : cap;

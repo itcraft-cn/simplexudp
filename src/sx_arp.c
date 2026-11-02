@@ -260,10 +260,9 @@ int sx_arp_input(sx_arp_t *arp, const uint8_t *frame, size_t len) {
 
     arp_learn(arp, spa, sha);
 
-    if (op == ARP_OP_REQUEST && (arp->local_ip == 0 || tpa == arp->local_ip)) {
-        if (arp->local_ip != 0 || tpa == arp->local_ip) {
-            arp_send_reply(arp, sha, spa);
-        }
+    if (op == ARP_OP_REQUEST && arp->local_ip != 0 &&
+        tpa == arp->local_ip) {
+        arp_send_reply(arp, sha, spa);
     }
     return 1;
 }
