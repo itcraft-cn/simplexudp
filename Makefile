@@ -39,6 +39,7 @@ LDLIBS    += -pthread -lrt
 
 BUILD      := build
 BPF_OBJ    := $(BUILD)/sx_xdp_kern.o
+BPF_ECHO_OBJ := $(BUILD)/xdp_echo_kern.o
 BLOB_C     := $(BUILD)/sx_xdp_kern_blob.c
 BPF_CFLAGS := -target bpf -O2 -g -I/usr/include/$(MULTIARCH)
 
@@ -81,7 +82,7 @@ $(EXAMPLES) $(TESTS) $(BUILD)/test_xdp $(BUILD)/test_latency $(BUILD)/test_throu
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all bpf examples tests tests-xdp tests-latency tests-throughput group-tools relay-tool check check-xdp check-latency check-latency-2p install uninstall clean
+.PHONY: all bpf bpf-echo xdp-echo test-xdp-echo examples tests tests-xdp tests-latency tests-throughput group-tools relay-tool check check-xdp check-latency check-latency-2p install uninstall clean
 all: $(STATIC_LIB) $(SHARED_LIB)
 
 install: all
@@ -96,6 +97,12 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/lib/libsimplexudp.so
 
 bpf: $(BPF_OBJ)
+
+# 纯 XDP_TX 反射程序（微基准，独立于 SX 数据面）。
+bpf-echo: $(BPF_ECHO_OBJ)
+
+$(BPF_ECHO_OBJ): bpf/xdp_echo_kern.c | $(BUILD)
+	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 # ---- BPF 目标（SX_NO_XDP=1 时不参与构建）----
 $(BPF_OBJ): bpf/sx_xdp_kern.c | $(BUILD)
@@ -117,6 +124,17 @@ $(STATIC_LIB): $(LIB_OBJS)
 
 $(SHARED_LIB): $(LIB_OBJS)
 	$(CC) -shared -o $@ $^ $(LDLIBS)
+
+# ---- 微基准：纯 XDP_TX 反射 ----
+xdp-echo: $(BUILD)/xdp_echo $(BPF_ECHO_OBJ)
+
+$(BUILD)/xdp_echo: tools/xdp_echo.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< -o $@ $(LDLIBS)
+
+test-xdp-echo: $(BUILD)/test_xdp_echo
+
+$(BUILD)/test_xdp_echo: tests/test_xdp_echo.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(CPPFLAGS) $< -o $@
 
 # ---- 示例 ----
 examples: $(EXAMPLES)
