@@ -9,6 +9,12 @@
 
 ### Added
 
+- `scripts/perf_skb_probe.sh`：用 bpftrace 计数 `__alloc_skb`/`napi_alloc_skb`/`napi_build_skb`/
+  `build_skb`/`kfree_skbmem`/`__netif_receive_skb_core`/`ip_rcv`，在无 vPMU 的云实例上也能判定
+  “XDP 是否真的省掉了 skb 构造与协议栈处理”；可选叠加 `perf stat` 采集 cycles/instructions。
+- `docs/benchmark-methodology.md`：性能结论的适用边界、测量纪律、TC ingress 与 native XDP 的
+  A/B 复现配方（含完整 BPF 程序），以及本机 veth 复现记录与三个测量陷阱。
+
 - 接收硬件时间戳：默认关闭，`rx_ts_mode` 显式开启；UDP 后端通过 `SO_TIMESTAMPING`
   返回 PHC 原始时间，`on_recv_ex`/`sx_recv_ex` 透出 `sx_pkt_info_t`。
 - AF_XDP 时间戳：启动时检测内核；>=6.7 时加载设备绑定的 XDP metadata 程序，
@@ -62,6 +68,9 @@
 
 - `max_message` 默认 64KB、硬上限 256KB；`send_window`/`recv_window` 自动下限 256（`c26e91a`）。
 - 单播、组播、广播均支持 256KB 自动拆包/重组；组播/广播仍为 best-effort 语义。
+- `README.md`/`README_en.md`/`MANUAL.md`/`MANUAL_en.md` 的性能段落补充适用边界：veth 上 XDP
+  不省 skb 构造，只有 virtio-net/物理口的 native XDP 才能在分配前丢弃；引用数字须标注
+  网卡/驱动、XDP 模式、zero-copy 与内核版本。
 - 文档增加静态 ARP、CC、UDP 缓冲、RTO、PTP、硬件时间戳、AF_XDP 基准与 45/46 测试记录
   （`e17b283`、`5c612f8`、`e0b6c74`、`740dce1`、`a8d48e6`、`b40d31e`）。
 - 补齐部署权限说明：AF_XDP 增加 `CAP_NET_RAW`，区分内核 < 5.8 的 `CAP_SYS_ADMIN`，补充 `setcap`/systemd 示例、特权端口要求与非 root 时 `AUTO` 回退 UDP 的行为（`README.md`、`MANUAL.md` 第 6/13/14/15 节）。

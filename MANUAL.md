@@ -511,6 +511,13 @@ cfg.on_recv_ex = on_msg;
 - **队列**：当前一个端点绑定一个 RX 队列（`xdp_queue`），且同一网卡只能有一个 SX XDP 端点；
   多队列横向扩展尚未实现，勿按“每队列一个端点/进程”部署。可先用多网卡/多 netns 扩展。
 - **日志**：生产建议 `SX_LOG_WARN`；调试可靠性问题时临时开 `SX_LOG_DEBUG`。
+- **性能结论的适用边界**：不要用“挂点更早”推断“更省 CPU”。veth 上的包到达 XDP 处理点前
+  已经作为 `sk_buff` 存在（发送侧构造），接收侧只做 `skb -> xdp_buff/xdp_frame` 转换，
+  XDP 在 veth 上并不省 skb 构造；只有 virtio-net/物理网卡的
+  native XDP 才能在 skb 分配前 `XDP_DROP`。引用性能数据必须同时标注网卡/驱动、XDP 模式
+  （driver/generic/skb）、是否 zero-copy 与内核版本；cycles 只比同一次 Run 内的相对差，
+  禁止跨机比较。用 `scripts/perf_skb_probe.sh` 计数 skb 构造与 `ip_rcv` 判定“是否真的省掉了
+  处理”，方法与 A/B 配方见 `docs/benchmark-methodology.md`。
 
 ---
 

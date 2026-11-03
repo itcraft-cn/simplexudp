@@ -169,9 +169,28 @@ The Python/Java binding evaluation and plan are in `docs/ffi-evaluation.md` and 
 - `tests/test_latency.c` + `scripts/xdp_latency.sh`: stop-and-wait round-trip latency statistics (min/avg/p50/p99/max),
   and while the test is attached, `bpftool net show` / `bpftool prog show` / `bpftool map dump` prove that traffic
   really goes through XDP (redirect counts in `sx_stats_map`).
+- `scripts/perf_skb_probe.sh`: counts skb construction and `ip_rcv` with bpftrace to decide whether XDP/TC
+  actually removed packet processing (no hardware PMU needed); see `docs/benchmark-methodology.md`.
 
 CentOS 7 / kernel 5.18 on real hardware is recorded in `docs/centos7-test-20261102.md`; the 10.45/10.46 25G cross-host
 AF_XDP latency/throughput results and residual XDP issues are in `docs/cross-host-45-46-20261102.md`.
+
+### Applicability of the performance numbers
+
+The numbers below are bound to a specific topology, driver, and XDP mode; do not extrapolate them:
+
+- The local sections and `scripts/*.sh` run over **veth** by default. A packet on veth already exists as an
+  `sk_buff` before it reaches the XDP hook (built on the send side); the receive side only converts
+  `skb -> xdp_buff/xdp_frame`. So **XDP here does not save the skb allocation**; it only skips the rest of
+  the stack. AF_XDP's gain comes from handing packets directly to user space and bypassing kernel UDP socket
+  queueing/wakeups/syscalls, and it is necessarily copy mode.
+- The cross-host numbers are bound to **mlx5 25G + native XDP**; virtual NICs without native XDP
+  (e.g. e1000) only support generic+copy (see `docs/vm-udp-xdp-test.md`).
+- Whenever you quote a number, state the NIC/driver, XDP mode (driver/generic/skb), zero-copy or not,
+  and kernel version.
+- To verify whether XDP actually removed the packet-processing work, count skb construction with
+  `scripts/perf_skb_probe.sh` instead of reasoning from attach-point order. Method, A/B recipe, and
+  three common measurement traps are in `docs/benchmark-methodology.md`.
 
 ### Measured reference (local machine, stop-and-wait RTT, n=20000), single process (both endpoints in one process):
 

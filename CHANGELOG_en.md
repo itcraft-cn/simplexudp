@@ -9,6 +9,14 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Added
 
+- `scripts/perf_skb_probe.sh`: counts `__alloc_skb`/`napi_alloc_skb`/`napi_build_skb`/`build_skb`/
+  `kfree_skbmem`/`__netif_receive_skb_core`/`ip_rcv` with bpftrace, so even cloud instances without a
+  vPMU can tell whether XDP really removed skb construction and stack processing; optionally layers
+  `perf stat` for cycles/instructions.
+- `docs/benchmark-methodology.md`: applicability boundaries for performance numbers, measurement
+  discipline, a TC ingress vs native XDP A/B recipe (with complete BPF programs), a local veth
+  reproduction record, and three measurement traps.
+
 - RX hardware timestamping: off by default, enabled explicitly with `rx_ts_mode`; the UDP backend returns the raw PHC
   time via `SO_TIMESTAMPING`, and `on_recv_ex`/`sx_recv_ex` expose `sx_pkt_info_t`.
 - AF_XDP timestamping: the kernel is probed at startup; on >=6.7 a device-bound XDP metadata program is loaded and the
@@ -74,6 +82,9 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Changed
 
+- `README.md`/`README_en.md`/`MANUAL.md`/`MANUAL_en.md` performance sections now state their applicability
+  boundaries: on veth, XDP does not save skb construction; only native XDP on virtio-net/physical NICs can drop
+  before allocation. Quoted numbers must include NIC/driver, XDP mode, zero-copy, and kernel version.
 - `max_message` defaults to 64KB with a 256KB hard limit; `send_window`/`recv_window` have an automatic minimum of 256
   (`c26e91a`).
 - Unicast, multicast, and broadcast all support automatic 256KB fragmentation/reassembly; multicast/broadcast keep

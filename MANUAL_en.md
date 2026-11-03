@@ -538,6 +538,14 @@ Plain NTP's sub-millisecond offset is not sufficient for microsecond-level times
   multi-queue horizontal scaling is not implemented, so do not deploy "one endpoint/process per queue". Scale with
   multiple NICs/netns for now.
 - **Logging**: use `SX_LOG_WARN` in production; temporarily enable `SX_LOG_DEBUG` when debugging reliability issues.
+- **Applicability of performance conclusions**: do not infer "less CPU" from "drops earlier". On veth a packet already
+  exists as an `sk_buff` when it reaches the XDP hook (built on the send side), and the receive side only converts
+  `skb -> xdp_buff/xdp_frame`, so XDP does not save skb construction there;
+  only native XDP on virtio-net/physical NICs can `XDP_DROP` before skb allocation. Any quoted number must state
+  NIC/driver, XDP mode (driver/generic/skb), zero-copy or not, and kernel version. Compare cycles only within the
+  same run; never compare absolute cycles across machines. Use `scripts/perf_skb_probe.sh` to count skb
+  construction and `ip_rcv` to decide whether work was actually removed; method and A/B recipe are in
+  `docs/benchmark-methodology.md`.
 
 ---
 

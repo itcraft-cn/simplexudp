@@ -170,9 +170,25 @@ sx_destroy(ep);
 - `tests/test_latency.c` + `scripts/xdp_latency.sh`：停等往返时延统计（min/avg/p50/p99/max），
   并在测试挂载期间用 `bpftool net show` / `bpftool prog show` / `bpftool map dump` 佐证
   流量确实经 XDP 处理（`sx_stats_map` 的 redirect 计数）。
+- `scripts/perf_skb_probe.sh`：用 bpftrace 统计 skb 构造与 `ip_rcv` 计数，判定 XDP/TC
+  是否真的省掉了包处理（不需要硬件 PMU）；方法见 `docs/benchmark-methodology.md`。
 
 CentOS 7 / 内核 5.18 实机记录见 `docs/centos7-test-20261102.md`；10.45/10.46 的 25G 跨机
 AF_XDP 时延/吞吐与残留 XDP 问题见 `docs/cross-host-45-46-20261102.md`。
+
+### 性能结论的适用边界
+
+下文的数字与拓扑、驱动、XDP 模式绑定，不可跨环境外推：
+
+- 本机小节与 `scripts/*.sh` 默认跑在 **veth** 上。veth 上的包在到达 XDP 处理点之前已经作为
+  `sk_buff` 存在（发送侧构造），接收侧最多做 `skb -> xdp_buff/xdp_frame` 的转换；因此 **这里的
+  XDP 不省 skb 分配**，只省后续协议栈。AF_XDP 的收益来自把包直接交给用户态、绕开内核 UDP
+  socket 的排队/唤醒/系统调用，且必然是 copy 模式。
+- 跨机小节的收益绑定 **mlx5 25G + native XDP**；e1000 等无 native XDP 的虚拟网卡只能
+  generic+copy（见 `docs/vm-udp-xdp-test.md`）。
+- 引用任何数字时请同时给出：网卡/驱动、XDP 模式（driver/generic/skb）、是否 zero-copy、内核版本。
+- 想验证“XDP 是否真的省掉了包处理”，用 `scripts/perf_skb_probe.sh` 看 skb 构造计数，
+  不要只看挂点早晚。方法、A/B 配方与三个常见测量陷阱见 `docs/benchmark-methodology.md`。
 
 ### 实测参考（本机，停等 RTT，n=20000）单进程（A/B 两端点在同一进程）：
 
